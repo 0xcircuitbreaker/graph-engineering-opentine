@@ -176,6 +176,42 @@ def test_huge_int_state_survives_save_and_load(tmp_path):
     assert step.outputs["state_after"]["wei"] == str(2**60)  # encoded as string
 
 
+def _nested(depth):
+    tree: dict = {"leaf": True}
+    for _ in range(depth):
+        tree = {"n": tree}
+    return tree
+
+
+def test_deeply_nested_state_survives_save(tmp_path):
+    """opentine's kernel rejects canonical JSON deeper than 512 levels;
+    graphforge caps snapshot depth first so the artifact still saves."""
+    nested = _nested(300)
+
+    def deep(ctx):
+        return GraphNodeResult(update={"tree": nested}, stop=True)
+
+    graph = GraphSpec().add_node("deep", deep).set_entry("deep")
+    result = GraphEngine(graph, runs_dir=tmp_path).run(goal="deep", initial_state={})
+    assert result.status == "completed"
+    assert result.artifact.exists()
+    Run.load(result.artifact)  # round-trips
+
+
+def test_unmergeable_state_fails_loudly_with_artifact(tmp_path):
+    """State too deep even for deepcopy: run fails but the trace persists."""
+    nested = _nested(50_000)
+
+    def deep(ctx):
+        return GraphNodeResult(update={"tree": nested})
+
+    graph = GraphSpec().add_node("deep", deep).set_entry("deep")
+    result = GraphEngine(graph, runs_dir=tmp_path).run(goal="too deep", initial_state={})
+    assert result.status == "failed"
+    assert result.stop_reason == "state_error"
+    assert result.artifact.exists()
+
+
 def test_sane_usage_clamps_to_canonical_range():
     assert sane_usage({"input": 2**60})["input"] == MAX_SAFE_INT
     assert to_jsonable(2**60) == str(2**60)

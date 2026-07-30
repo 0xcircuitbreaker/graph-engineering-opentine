@@ -141,7 +141,12 @@ class GraphRunCapture:
         self._guard(_do)
 
     def edge(self, source: str, target: str, *, label: str = "") -> None:
-        """Declare that an edge was taken; applied to the next start of ``target``."""
+        """Declare that an edge was taken; applied to the next start of ``target``.
+
+        Target ``"*"`` declares a wildcard edge (e.g. a router whose label is
+        known before its destination): it attaches to whichever node starts
+        next.
+        """
 
         def _do() -> None:
             self._pending_edges[target] = {
@@ -165,8 +170,11 @@ class GraphRunCapture:
         def _do() -> None:
             # Consume any declared edge for this node even when an explicit
             # edge is given, so a stale declaration never leaks onto a later
-            # unrelated execution.
+            # unrelated execution. A "*" wildcard edge attaches to whichever
+            # node starts next.
             pending = self._pending_edges.pop(node_id, None)
+            if pending is None:
+                pending = self._pending_edges.pop("*", None)
             resolved_edge = edge or pending
             if resolved_edge is None and self._node_tips:
                 # Fall back to "last completed node fed this one".
@@ -224,6 +232,7 @@ class GraphRunCapture:
                     cost=cost,
                     duration=duration,
                     usage=usage,
+                    parent_id=self._node_tips.get(node_id) if node_id else None,
                     node_id=node_id,
                 )
 
@@ -254,7 +263,13 @@ class GraphRunCapture:
                 open_node.tool_calls.append(call)
             else:
                 self._recorder.record_tool_call(
-                    name, args=args, result=result, error=error, duration=duration
+                    name,
+                    args=args,
+                    result=result,
+                    error=error,
+                    duration=duration,
+                    parent_id=self._node_tips.get(node_id) if node_id else None,
+                    node_id=node_id,
                 )
 
         self._guard(_do)

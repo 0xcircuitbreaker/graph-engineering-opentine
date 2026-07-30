@@ -419,7 +419,14 @@ class GraphEngine:
 
             new_state = dict(task.state)
             if result.update:
-                new_state.update(copy.deepcopy(result.update))
+                try:
+                    new_state.update(copy.deepcopy(result.update))
+                except Exception as exc:  # noqa: BLE001 - pathological updates must not lose the trace
+                    recorder.record_error(exc, parent_id=parent_id or last_step_id)
+                    stop_reason = "state_error"
+                    status = "failed"
+                    terminal_states.append(task.state)
+                    break
 
             step_id = recorder.record_node(
                 task.node_id,

@@ -190,6 +190,32 @@ if _HAS_TYPER:
         """Fork a run at a step into a new artifact."""
         _emit(mcp_mod.fork_run(artifact, from_step, branch, runs_dir), None)
 
+    @app.command("ingest-otel")
+    def ingest_otel(
+        spans_file: Path = typer.Argument(..., exists=True, dir_okay=False),
+        goal: str = typer.Option("otel ingest", help="goal recorded on the run"),
+        runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),
+    ) -> None:
+        """Record a JSON file of OTel GenAI spans as a graph run."""
+        from .ingest import ingest_otel_spans
+
+        payload = json.loads(spans_file.read_text(encoding="utf-8"))
+        spans = payload.get("spans", payload) if isinstance(payload, dict) else payload
+        artifact = ingest_otel_spans(goal, spans, runs_dir=runs_dir)
+        _emit({"artifact": str(artifact)}, None)
+
+    @app.command("ingest-jsonl")
+    def ingest_jsonl_cmd(
+        events_file: Path = typer.Argument(..., exists=True, dir_okay=False),
+        goal: str = typer.Option("jsonl ingest", help="goal recorded on the run"),
+        runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),
+    ) -> None:
+        """Replay a JSONL event stream into a recorded graph run."""
+        from .ingest import ingest_jsonl
+
+        artifact = ingest_jsonl(goal, events_file, runs_dir=runs_dir)
+        _emit({"artifact": str(artifact)}, None)
+
     @app.command("mcp-server")
     def mcp_server_cmd(
         runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),

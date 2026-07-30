@@ -20,16 +20,31 @@ MAX_ITEMS = 100
 # opentine's canonical JSON (and RFC 8785) rejects integers beyond +/-(2^53-1).
 MAX_SAFE_INT = 2**53 - 1
 
+# opentine's kernel rejects canonical JSON nested deeper than 512 levels;
+# stay far under it (and under Python's recursion limit) so a pathological
+# state degrades to a repr string instead of failing the save.
+MAX_DEPTH = 100
 
-def to_jsonable(value: Any, *, max_chars: int | None = None, max_items: int | None = None) -> Any:
+
+def to_jsonable(
+    value: Any,
+    *,
+    max_chars: int | None = None,
+    max_items: int | None = None,
+    _depth: int = 0,
+) -> Any:
     """Convert an arbitrary value into JSON-serializable form.
 
     Optional truncation caps string length and collection size; without the
     caps the conversion is lossless for JSON-shaped data (used for state
-    snapshots that must survive a resume). Non-finite floats and integers
-    outside the canonical-JSON safe range are encoded as strings so opentine
-    never rejects the payload at save time.
+    snapshots that must survive a resume). Non-finite floats, integers
+    outside the canonical-JSON safe range, and nesting beyond ``MAX_DEPTH``
+    are encoded as strings so opentine never rejects the payload at save
+    time.
     """
+    if _depth >= MAX_DEPTH:
+        text = repr(value)
+        return text[:200] + "...[depth-capped]" if len(text) > 200 else text + " [depth-capped]"
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, int) and not isinstance(value, bool):
@@ -51,7 +66,8 @@ def to_jsonable(value: Any, *, max_chars: int | None = None, max_items: int | No
             items = items[:max_items]
             truncated = True
         out = {
-            str(k): to_jsonable(v, max_chars=max_chars, max_items=max_items) for k, v in items
+            str(k): to_jsonable(v, max_chars=max_chars, max_items=max_items, _depth=_depth + 1)
+            for k, v in items
         }
         if truncated:
             out["__truncated__"] = f"{len(value) - max_items} items dropped"
@@ -62,7 +78,10 @@ def to_jsonable(value: Any, *, max_chars: int | None = None, max_items: int | No
         if max_items is not None and len(items) > max_items:
             note = f"...[truncated {len(items) - max_items} items]"
             items = items[:max_items]
-        out_list = [to_jsonable(v, max_chars=max_chars, max_items=max_items) for v in items]
+        out_list = [
+            to_jsonable(v, max_chars=max_chars, max_items=max_items, _depth=_depth + 1)
+            for v in items
+        ]
         if note is not None:
             out_list.append(note)
         return out_list

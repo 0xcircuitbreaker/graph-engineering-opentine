@@ -11,7 +11,8 @@ Sibling of [`loop-engineering-opentine`](https://github.com/0xcircuitbreaker/loo
 - `GraphEngine.resume` — **time travel for any graph**: fork a recorded artifact at any step, mutate state, and continue the graph from there.
 - `GraphRecorder` — the single opentine integration point (one file to touch on opentine upgrades).
 - `GraphRunCapture` — the universal push-based adapter: record **any** external graph framework (LangGraph, Burr, CrewAI Flows, LlamaIndex Workflows, pydantic-graph, homegrown engines) via `node_start` / `node_end` / `model_call` / `tool_call` / `edge` / `end` events. Never-throw discipline: recorder failures never break the host.
-- `graphforge.adapters.langgraph` — ready LangGraph integration: a delegating checkpointer wrapper plus a callback handler, both zero-change attach points.
+- Shipped adapters — all zero-change attach points, all import-safe without their framework: **LangGraph** (checkpointer wrapper + callback handler), **Burr** (lifecycle hook), **CrewAI Flows** (event-bus listener with per-flow isolation), **LlamaIndex Workflows** (checkpoint conversion), **pydantic-graph V2** (`graph.iter()` driver with `fork_stack` lineage).
+- Zero-glue ingestion for everything else: `ingest_otel_spans` (OTel GenAI semantic conventions) and `ingest_jsonl` (plain JSON-lines event streams).
 - `GraphPolicy` — **run-wide** budgets: node executions, total cost, wall clock, cycle guard (`max_visits_per_node`), success threshold.
 - CLI + MCP server for running demos and listing/showing/diffing/forking artifacts.
 
@@ -129,12 +130,83 @@ cap.end()
 
 The checkpointer wrapper records every superstep checkpoint (the forkable-point table: `checkpoint_id`, parent checkpoint, `source`, full channel values). The callback handler records node executions keyed by `langgraph_node` metadata, the trigger that fired each node, and model/tool calls with token usage.
 
-### Other frameworks (glue sketches)
+### Burr (shipped adapter)
 
-- **Burr**: implement `PostRunStepHook.post_run_step(...)` → `cap.node_end(action.name, state=state.serialize(), ...)`; `PostApplicationCreateHook` → `cap.begin(graph=...)` with the static `application_graph`.
-- **CrewAI Flows**: a `BaseEventListener` mapping `MethodExecutionStarted/Finished` → `node_start`/`node_end`, `LLMCallCompleted` → `model_call` (correlate by flow state id — the bus is a process singleton).
-- **LlamaIndex Workflows**: tee `WorkflowCheckpointer` checkpoints → `cap.checkpoint(...)` + `node_end(ckpt.last_completed_step, ...)`; edges reconstruct as (producer step, event type, consumer step).
-- **pydantic-graph (V2)**: drive `graph.iter()` and record each yielded `GraphTask` batch; `fork_stack` gives exact fork lineage.
+```python
+from graphforge import GraphRunCapture
+from graphforge.adapters import TineBurrHook
+
+cap = GraphRunCapture("my burr app", framework="burr")
+app = (ApplicationBuilder()
+       .with_actions(...).with_transitions(...)
+       .with_hooks(TineBurrHook(cap))     # one line, zero action changes
+       .build())
+app.run(halt_after=["done"])
+cap.end()
+```
+
+Records the static topology (actions + transitions) and fork lineage from `post_application_create`, then one node per executed action with pre/post state snapshots and the edge from the previous action.
+
+### CrewAI Flows (shipped adapter)
+
+```python
+from graphforge.adapters import TineFlowListener
+
+listener = TineFlowListener(runs_dir="~/.local/share/graphforge")
+# with crewai installed the listener self-registers on the event bus;
+# every flow gets its own capture keyed by state id (bus is a singleton),
+# @router return labels become edge labels, LLM calls carry usage/cost.
+# finished flows land in listener.artifacts.
+```
+
+### LlamaIndex Workflows (shipped adapter)
+
+```python
+from graphforge import GraphRunCapture
+from graphforge.adapters import record_checkpoints
+
+wc = WorkflowCheckpointer(workflow=wf)
+handler = wc.run(topic="...")
+await handler
+# WorkflowCheckpointer stores checkpoints in memory only — persist them:
+record_checkpoints(GraphRunCapture("wf run", framework="llamaindex"), wc)
+```
+
+Edges reconstruct as (producer step, event type, consumer step); every checkpoint's full `ctx_state` becomes a forkable marker.
+
+### pydantic-graph V2 (shipped adapter)
+
+```python
+from graphforge import GraphRunCapture
+from graphforge.adapters import record_graph_run
+
+cap = GraphRunCapture("pg run", framework="pydantic-graph")
+output, artifact = await record_graph_run(cap, graph, state=MyState())
+```
+
+Drives `graph.iter()` — nodes execute exactly as they would; every scheduled `GraphTask` is recorded with its `fork_stack` (pydantic-graph's exact parallel-branch ancestry) and per-event state snapshots.
+
+## Zero-glue ingestion (no adapter needed)
+
+Any setup that can produce OTel GenAI spans or append JSON lines gets recording with no Python integration:
+
+```python
+from graphforge import ingest_otel_spans, ingest_jsonl
+
+# OTel GenAI semantic conventions: invoke_agent -> nodes, chat -> model
+# calls, execute_tool -> tool calls, attributed via the span parent tree
+ingest_otel_spans("traced run", spans)
+
+# lowest common denominator: JSONL events
+# {"type": "node_start"|"node_end"|"model_call"|"tool_call"|"edge"|
+#  "checkpoint"|"error"|"end", ...}
+ingest_jsonl("logged run", "events.jsonl")
+```
+
+```bash
+graphforge ingest-otel spans.json
+graphforge ingest-jsonl events.jsonl
+```
 
 ## Policy
 
@@ -165,7 +237,8 @@ Tools: `list_graph_runs`, `show_graph_run`, `show_graph_topology` (topology + tr
 - `src/graphforge/engine.py` — frontier execution, fan-out/join, cycles, resume.
 - `src/graphforge/recorder.py` — opentine integration (the only writer).
 - `src/graphforge/capture.py` — universal push-based framework capture.
-- `src/graphforge/adapters/langgraph.py` — LangGraph checkpointer + callbacks.
+- `src/graphforge/adapters/` — LangGraph, Burr, CrewAI Flows, LlamaIndex Workflows, pydantic-graph.
+- `src/graphforge/ingest.py` — OTel GenAI span + JSONL event ingestion.
 - `src/graphforge/models.py` — model adapters + fence-safe JSON node builder.
 - `src/graphforge/policy.py` — run-wide budgets.
 - `src/graphforge/examples.py` — deterministic offline demo graphs.

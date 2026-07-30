@@ -16,6 +16,7 @@ from .engine import (
     GraphNodeContext,
     GraphNodeResult,
 )
+from .ingest import ingest_jsonl, ingest_otel_spans
 from .models import (
     GraphModelAdapter,
     GraphModelOutput,
@@ -51,5 +52,7 @@ __all__ = [
     "StaticModelAdapter",
     "build_json_model_node",
     "extract_json",
+    "ingest_jsonl",
+    "ingest_otel_spans",
     "__version__",
 ]
