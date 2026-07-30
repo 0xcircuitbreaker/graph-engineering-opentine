@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opentine-graph-engineering"
+version = "0.1.0"
+description = "Graph engineering toolkit with opentine-native record/fork/replay provenance for any graph framework"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+keywords = [
+  "opentine",
+  "graph engineering",
+  "agent graphs",
+  "provenance",
+  "fork",
+  "replay",
+  "langgraph",
+  "mcp",
+]
+dependencies = ["opentine>=0.2.0,<0.4"]
+
+[project.optional-dependencies]
+cli = ["typer>=0.12"]
+mcp = ["mcp>=1.0"]
+langgraph = ["langgraph-checkpoint>=2.0"]
+dev = ["pytest>=8", "ruff>=0.6", "typer>=0.12", "mcp>=1.0"]
+
+[project.scripts]
+graphforge = "graphforge.cli:app"
+graphforge-mcp = "graphforge.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/graphforge"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/graphforge/cli.py" = ["B008"]
