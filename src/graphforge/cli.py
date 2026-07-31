@@ -161,14 +161,75 @@ if _HAS_TYPER:
     @app.command()
     def verify(
         artifact: Path = typer.Argument(..., exists=True, dir_okay=False),
+        hmac_key: str | None = typer.Option(
+            None, help="HMAC key to check the signature against"
+        ),
+        public_key: Path | None = typer.Option(
+            None, help="Ed25519 public key file to check the signature against"
+        ),
     ) -> None:
-        """Verify artifact integrity (digest check)."""
-        result = Run.verify_integrity(artifact)
-        payload: dict[str, Any] = {"ok": result.ok, "digest": result.expected}
-        if not result.ok:
-            payload["reason"] = getattr(result, "reason", None)
+        """Check artifact integrity and, when a key is given, its signature.
+
+        Integrity is a checksum: it proves the file was not corrupted, NOT
+        that nobody rewrote it. Only a signature is tamper evidence, and even
+        then tags sit outside what the signature covers.
+        """
+        integrity = Run.verify_integrity(artifact)
+        # Report whether a signature EXISTS separately from whether it was
+        # checked, so "signed but unverified" is greppable and never reads
+        # the same as "not signed".
+        signature_present = False
+        try:
+            body = json.loads(artifact.read_text(encoding="utf-8"))
+            signature_present = bool(
+                (body.get("metadata") or {}).get("integrity", {}).get("signature")
+            )
+        except (OSError, ValueError, AttributeError):
+            signature_present = False
+        payload: dict[str, Any] = {
+            "integrity_ok": integrity.ok,
+            "digest": integrity.expected,
+            "signature_present": signature_present,
+            "signature_checked": False,
+        }
+        if not integrity.ok:
+            payload["integrity_reason"] = getattr(integrity, "reason", None)
+
+        key_material: dict[str, Any] = {}
+        # Fail closed on an empty key: an unset environment variable is the
+        # normal way CI produces one, and treating it as "no key given" would
+        # silently downgrade to a checksum and exit 0 on a tampered artifact.
+        if hmac_key is not None:
+            if not hmac_key.strip():
+                raise typer.BadParameter(
+                    "--hmac-key was empty (unset environment variable?); "
+                    "pass a real key or omit the flag"
+                )
+            key_material["hmac_key"] = hmac_key.encode("utf-8")
+        if public_key is not None:
+            material = public_key.read_bytes()
+            if not material.strip():
+                raise typer.BadParameter(f"--public-key file {public_key} is empty")
+            key_material["public_key"] = material
+        signature_ok = True
+        if key_material:
+            signature = Run.verify_signature(artifact, **key_material)
+            state = getattr(signature, "state", "")
+            payload.update(
+                {
+                    "signature_checked": True,
+                    "signature_ok": signature.ok,
+                    # Never render verified-tofu as plain "verified": it means
+                    # the embedded key was trusted on first use, not checked.
+                    "signature_state": state,
+                    "signer": getattr(signature, "signer", None),
+                    "key_id": getattr(signature, "key_id", None),
+                    "signature_reason": getattr(signature, "reason", None),
+                }
+            )
+            signature_ok = signature.ok and state == "verified"
         _emit(payload, None)
-        if not result.ok:
+        if not integrity.ok or not signature_ok:
             raise typer.Exit(code=1)
 
     @app.command()
@@ -216,12 +277,146 @@ if _HAS_TYPER:
         artifact = ingest_jsonl(goal, events_file, runs_dir=runs_dir)
         _emit({"artifact": str(artifact)}, None)
 
+    @app.command("graph-diff")
+    def graph_diff_cmd(
+        left: str = typer.Argument(...),
+        right: str = typer.Argument(...),
+        runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),
+    ) -> None:
+        """Diff two runs at the GRAPH layer: path, edges, visits, score drift.
+
+        Unlike a step diff, this answers "did these two runs behave the
+        same?" — opentine's own diffs cannot, because v3 event identity
+        includes a timestamp.
+        """
+        # Via the MCP function, not Run.load directly: that path is confined
+        # to runs_dir and size-capped before loading.
+        _emit(mcp_mod.graph_diff_runs(left, right, runs_dir), None)
+
+    # ---------------------------------------------------- v3 repository ----
+
+    def _require_repo() -> Any:
+        from . import repo_backend
+
+        if not repo_backend.repo_available():
+            print("v3 repositories need opentine>=0.3.0 (the installed opentine has no Repo)")
+            raise typer.Exit(code=2)
+        return repo_backend
+
+    @app.command("repo-init")
+    def repo_init(path: str = typer.Argument(".", help="where to create .tine/")) -> None:
+        """Create a v3 .tine repository."""
+        backend = _require_repo()
+        repo = backend.open_repo(path, create=True)
+        _emit({"worktree": str(repo.worktree), "repo": str(repo.path)}, None)
+
+    @app.command("repo-save")
+    def repo_save(
+        artifact: str = typer.Argument(..., help="a .tine file, name, or run-id prefix"),
+        repo_path: str = typer.Option(".", "--repo", help="repository worktree"),
+        ref: str | None = typer.Option(
+            None, help="ref to advance, e.g. experiments/my-run (graphforge writes experiments/*)"
+        ),
+        runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),
+    ) -> None:
+        """Store a recorded run in a v3 repository as content-addressed objects."""
+        backend = _require_repo()
+        run = Run.load(mcp_mod._normalize_ref(artifact, Path(runs_dir).expanduser()))
+        result = backend.save_to_repo(run, repo_path, ref=ref)
+        result["event_map"] = len(result["event_map"])  # count, not the whole map
+        _emit(result, None)
+
+    @app.command("repo-status")
+    def repo_status_cmd(
+        repo_path: str = typer.Option(".", "--repo"),
+        deep: bool = typer.Option(True, help="run a deep fsck"),
+    ) -> None:
+        """Refs, object count, shallow boundary, and an fsck verdict."""
+        backend = _require_repo()
+        _emit(backend.repo_status(repo_path, deep=deep), None)
+
+    @app.command("repo-evaluate")
+    def repo_evaluate(
+        run_oid: str = typer.Argument(..., help="run:sha256:... or a ref name"),
+        score: float = typer.Option(..., help="the number you actually gate on"),
+        metric: str = typer.Option("gate", help="metric name"),
+        signer: str = typer.Option(..., help="who is asserting this (a label, not an identity)"),
+        repo_path: str = typer.Option(".", "--repo"),
+    ) -> None:
+        """Attach an evaluation attestation so the run becomes searchable.
+
+        Emit ONE metric per attestation: opentine scores a claim by the mean
+        of its scores dict, so mixing a pass rate with a cost is meaningless.
+        """
+        backend = _require_repo()
+        try:
+            _emit(
+                {
+                    "attestation": backend.evaluate(
+                        repo_path, run_oid, {metric: score}, signer=signer
+                    )
+                },
+                None,
+            )
+        except ValueError as exc:
+            print(str(exc))
+            raise typer.Exit(code=1) from exc
+
+    @app.command("repo-candidates")
+    def repo_candidates(
+        min_score: float | None = typer.Option(None, help="only runs scored at or above this"),
+        model: str | None = typer.Option(None, help="only runs that used this model"),
+        repo_path: str = typer.Option(".", "--repo"),
+        limit: int = typer.Option(50),
+    ) -> None:
+        """List evaluated runs, best first (needs repo-evaluate to have scored them)."""
+        backend = _require_repo()
+        found = backend.candidates(
+            repo_path, min_score=min_score, model=model, limit=limit
+        )
+        _emit(
+            {
+                "candidates": [
+                    {
+                        "run_id": c.run_id,
+                        "status": c.status,
+                        "score": c.score,
+                        "cost": c.cost,
+                        "models": list(c.models),
+                    }
+                    for c in found
+                ]
+            },
+            None,
+        )
+
+    @app.command("repo-promote")
+    def repo_promote(
+        run_oid: str = typer.Argument(...),
+        name: str = typer.Argument(..., help="release gate name, e.g. prod"),
+        signer: str | None = typer.Option(
+            None, help="record an approval attestation as this label"
+        ),
+        force: bool = typer.Option(False, help="advance a gate that already points elsewhere"),
+        repo_path: str = typer.Option(".", "--repo"),
+    ) -> None:
+        """Move a release gate to a run, under compare-and-swap."""
+        backend = _require_repo()
+        try:
+            _emit(backend.promote(repo_path, run_oid, name, force=force, signer=signer), None)
+        except ValueError as exc:
+            print(str(exc))
+            raise typer.Exit(code=1) from exc
+
     @app.command("mcp-server")
     def mcp_server_cmd(
         runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),
+        repo_path: str | None = typer.Option(
+            None, "--repo", help="also expose opentine's v3 repository tools"
+        ),
     ) -> None:
         """Start the graphforge MCP server over stdio."""
-        server = mcp_mod.build_server(runs_dir=runs_dir)
+        server = mcp_mod.build_server(runs_dir=runs_dir, repo_path=repo_path)
         server.run(transport="stdio")
 
 

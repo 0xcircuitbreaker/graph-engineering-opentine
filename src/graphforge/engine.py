@@ -29,7 +29,7 @@ from opentine import Run
 from .policy import GraphPolicy
 from .recorder import GraphRecorder
 from .spec import END, GraphSpec, NodeSpec
-from .state import sane_score, state_delta, state_digest
+from .state import sane_score, state_delta, state_digest, to_jsonable
 
 
 class GraphExecutionError(RuntimeError):
@@ -198,7 +198,7 @@ class GraphEngine:
         node_id = inputs.get("node")
         if node_id is None or node_id not in self.graph.nodes:
             raise GraphExecutionError(
-                f"step {from_step[:12]} did not record a node known to this graph"
+                f"step {_short(from_step)} did not record a node known to this graph"
             )
         snapshot = outputs.get("state_after")
         if snapshot is None:
@@ -223,7 +223,7 @@ class GraphEngine:
                         else "the snapshot does not match its recorded digest"
                     )
                     raise GraphExecutionError(
-                        f"cannot resume from step {from_step[:12]}: {detail}"
+                        f"cannot resume from step {_short(from_step)}: {detail}"
                     )
                 snapshot_ok = False
         state = copy.deepcopy(snapshot) if isinstance(snapshot, dict) else {}
@@ -245,18 +245,27 @@ class GraphEngine:
             recorded_graph.get("topology_digest")
             and recorded_graph["topology_digest"] != self.graph.topology_digest()
         ):
-            tag = "graph:topology-drift"
-            if tag not in recorder.run.tags:
-                recorder.run.tags.append(tag)
-        if not snapshot_ok and "graph:snapshot-redacted" not in recorder.run.tags:
-            recorder.run.tags.append("graph:snapshot-redacted")
+            recorder.add_tag("graph:topology-drift")
+            recorder.record_gate(
+                "topology_drift",
+                {
+                    "recorded": recorded_graph.get("topology_digest"),
+                    "executing": self.graph.topology_digest(),
+                },
+                parent_id=from_step,
+            )
+        if not snapshot_ok:
+            recorder.add_tag("graph:snapshot-redacted")
+            recorder.record_gate(
+                "snapshot_redacted", {"step": _short(from_step)}, parent_id=from_step
+            )
         # The artifact must describe the graph that actually executes the
         # continuation, not the stale parent topology.
         fork_manifest = recorder.run.manifest
         if isinstance(fork_manifest, dict):
             if recorded_graph:
-                fork_manifest["graph_at_record"] = recorded_graph
-            fork_manifest["graph"] = self.graph.describe()
+                fork_manifest["graph_at_record"] = to_jsonable(recorded_graph)
+            fork_manifest["graph"] = to_jsonable(self.graph.describe())
         # Continue visit counting where the retained lineage left off so one
         # artifact never contains duplicate (node, visit) pairs.
         initial_visits: dict[str, int] = {}
@@ -352,7 +361,13 @@ class GraphEngine:
                     status = "failed"
                     terminal_states.extend(a.state for a in arrivals)
                     break
-                parents = [a.parent_step_id for a in arrivals if a.parent_step_id]
+                # Order-preserving dedupe: two arrivals can share a parent
+                # (one node fanning into the same join twice), and opentine's
+                # v3 store rejects a step whose parent_ids repeat — the run
+                # would save as a file and then never enter a repository.
+                parents = list(
+                    dict.fromkeys(a.parent_step_id for a in arrivals if a.parent_step_id)
+                )
                 task = _Task(
                     node_id=node_id,
                     state=merged,
@@ -530,9 +545,12 @@ class GraphEngine:
             # Keep the real stop reason but surface the parked arrivals: tag
             # the run and prepend their states so nothing silently vanishes
             # (final_state stays the state of the branch that stopped the run).
-            tag = "graph:unresolved_join"
-            if tag not in recorder.run.tags:
-                recorder.run.tags.append(tag)
+            recorder.add_tag("graph:unresolved_join")
+            recorder.record_gate(
+                "unresolved_join",
+                {"nodes": sorted(joins), "arrivals": sum(len(v) for v in joins.values())},
+                parent_id=last_step_id,
+            )
             parked = [a.state for arrivals in joins.values() for a in arrivals]
             terminal_states[:0] = parked
 
@@ -648,6 +666,16 @@ class GraphEngine:
         for state in states:
             merged.update(state)
         return merged
+
+
+def _short(step_id: str, width: int = 12) -> str:
+    """Readable prefix of a step id.
+
+    A v3 event OID is ``event:sha256:<hex>``; truncating it raw yields the
+    literal ``event:sha256:`` and names no step at all.
+    """
+    tail = step_id.rsplit(":", 1)[-1] if ":" in step_id else step_id
+    return tail[:width]
 
 
 def _keys_with_redaction(state: dict[str, Any]) -> list[str]:

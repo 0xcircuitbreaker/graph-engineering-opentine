@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "opentine-graph-engineering"
-version = "0.2.0"
+version = "0.3.0"
 description = "Graph engineering toolkit with opentine-native record/fork/replay provenance for any graph framework"
 readme = "README.md"
 requires-python = ">=3.11"

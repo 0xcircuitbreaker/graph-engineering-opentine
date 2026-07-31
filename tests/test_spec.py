@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from graphforge import END, GraphSpec, GraphValidationError
@@ -64,5 +66,46 @@ def test_describe_and_mermaid():
     assert body["topology_digest"]
     diagram = graph.mermaid()
     assert "flowchart TD" in diagram
-    assert "a -- go --> b" in diagram
+    # Piped label form: `-- go -->` would let a label containing `---`
+    # terminate the link and declare a node that never ran.
+    assert 'a -->|"go"| b' in diagram
     assert "__start__" in diagram
+
+
+def test_mermaid_label_cannot_terminate_a_link():
+    graph = (
+        GraphSpec()
+        .add_node("a", _noop)
+        .add_node("b", _noop)
+        .add_edge("a", "b", label='ok --- injected["x"] |y|')
+        .set_entry("a")
+    )
+    diagram = graph.mermaid()
+    assert "injected" not in _identifiers(diagram)
+    assert "#quot;" in diagram and "#124;" in diagram
+
+
+def test_mermaid_slugifies_hostile_node_ids():
+    hostile = 'evil"] --> owned["pwned'
+    graph = (
+        GraphSpec()
+        .add_node(hostile, _noop)
+        .add_node("end", _noop)  # a mermaid reserved word
+        .add_edge(hostile, "end")
+        .set_entry(hostile)
+    )
+    diagram = graph.mermaid()
+    idents = _identifiers(diagram)
+    assert "owned" not in idents
+    # bare `end` as an identifier aborts the whole flowchart
+    assert "end" not in idents
+    assert all(ident.replace("_", "").isalnum() or not ident for ident in idents)
+
+
+def _identifiers(diagram: str) -> set[str]:
+    """Every token in an identifier position (outside quotes)."""
+    found: set[str] = set()
+    for line in diagram.splitlines()[1:]:
+        outside = re.sub(r'"[^"]*"', "", line)
+        found.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", outside))
+    return found

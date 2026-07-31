@@ -212,8 +212,11 @@ def test_unmergeable_state_fails_loudly_with_artifact(tmp_path):
     assert result.artifact.exists()
 
 
-def test_sane_usage_clamps_to_canonical_range():
-    assert sane_usage({"input": 2**60})["input"] == MAX_SAFE_INT
+def test_sane_usage_discards_out_of_canonical_range():
+    # Clamping would fabricate a plausible count inside the digested body;
+    # opentine's own importer discards the dimension, so graphforge does too.
+    assert sane_usage({"input": 2**60}) is None
+    assert sane_usage({"input": 2**60, "output": 5}) == {"output": 5}
     assert to_jsonable(2**60) == str(2**60)
     assert to_jsonable(-(2**60)) == str(-(2**60))
     assert to_jsonable(MAX_SAFE_INT) == MAX_SAFE_INT
@@ -378,13 +381,15 @@ def test_build_server_smoke(tmp_path):
     server = build_server(str(tmp_path))
     tools = asyncio.run(server.list_tools())
     names = {t.name for t in tools}
-    assert names == {
+    # The graph layer is what graphforge adds over opentine's own tools.
+    assert {
         "list_graph_runs",
         "show_graph_run",
         "show_graph_topology",
         "diff_graph_runs",
         "fork_graph_run",
-    }
+        "graph_diff_runs",
+    } <= names
 
 
 def test_mcp_fork_twice_distinct_artifacts(tmp_path):

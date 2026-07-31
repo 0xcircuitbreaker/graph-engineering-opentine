@@ -8,6 +8,7 @@ artifacts verify, diff, and replay through standard opentine tooling.
 
 from ._version import __version__
 from .capture import GraphRunCapture
+from .diffing import graph_diff
 from .engine import (
     BestSnapshot,
     GraphEngine,
@@ -16,7 +17,14 @@ from .engine import (
     GraphNodeContext,
     GraphNodeResult,
 )
-from .ingest import ingest_jsonl, ingest_otel_spans
+from .ingest import (
+    FRAMEWORK_DIALECTS,
+    ingest_framework,
+    ingest_jsonl,
+    ingest_otel_spans,
+    ingest_trace_events,
+    normalize_otlp,
+)
 from .models import (
     GraphModelAdapter,
     GraphModelOutput,
@@ -27,11 +35,23 @@ from .models import (
 )
 from .policy import GraphPolicy, GraphPolicyViolation
 from .recorder import DEFAULT_RUNS_DIR, GraphRecorder
+from .repo_backend import (
+    RepoUnavailableError,
+    candidates,
+    evaluate,
+    load_from_repo,
+    open_repo,
+    promote,
+    repo_available,
+    repo_status,
+    save_to_repo,
+)
 from .spec import END, EdgeSpec, GraphSpec, GraphValidationError, NodeSpec
 
 __all__ = [
     "DEFAULT_RUNS_DIR",
     "END",
+    "FRAMEWORK_DIALECTS",
     "BestSnapshot",
     "EdgeSpec",
     "GraphEngine",
@@ -49,10 +69,23 @@ __all__ = [
     "GraphValidationError",
     "NodeSpec",
     "OpenAICompatAdapter",
+    "RepoUnavailableError",
     "StaticModelAdapter",
     "build_json_model_node",
+    "candidates",
+    "evaluate",
     "extract_json",
+    "graph_diff",
+    "ingest_framework",
     "ingest_jsonl",
     "ingest_otel_spans",
+    "ingest_trace_events",
+    "load_from_repo",
+    "normalize_otlp",
+    "open_repo",
+    "promote",
+    "repo_available",
+    "repo_status",
+    "save_to_repo",
     "__version__",
 ]

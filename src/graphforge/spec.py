@@ -15,6 +15,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from .mermaid import edge_line, mermaid_id, mermaid_ids, mermaid_label
+
 END = "__end__"
 
 NODE_KINDS = ("think", "model", "tool")
@@ -129,21 +131,35 @@ class GraphSpec:
         return self.describe()["topology_digest"]
 
     def mermaid(self) -> str:
-        """Mermaid flowchart of the static topology."""
+        """Mermaid flowchart of the static topology.
+
+        Node ids and edge labels can arrive from an ingested third-party
+        topology, so identifiers are slugged and label text only ever appears
+        inside quoted, entity-escaped positions.
+        """
+        names = [n.node_id for n in self.nodes.values()]
+        if any(e.target == END for e in self.edges):
+            names.append(END)
+        if self.entry:
+            names.append("__start__")
+        idents = mermaid_ids(names)
         lines = ["flowchart TD"]
         for node in self.nodes.values():
             shape = ("[[", "]]") if node.join else ("[", "]")
             suffix = f" ({node.kind})" if node.kind != "think" else ""
-            lines.append(f'    {node.node_id}{shape[0]}"{node.node_id}{suffix}"{shape[1]}')
-        if any(e.target == END for e in self.edges):
-            lines.append(f'    {END}(("end"))')
+            label = mermaid_label(f"{node.node_id}{suffix}")
+            lines.append(f'    {idents[node.node_id]}{shape[0]}"{label}"{shape[1]}')
+        if END in idents:
+            lines.append(f'    {idents[END]}(("end"))')
         for edge in self.edges:
-            arrow = f"-- {edge.label} -->" if edge.label else "-->"
-            lines.append(f"    {edge.source} {arrow} {edge.target}")
+            source = idents.get(edge.source, mermaid_id(edge.source))
+            target = idents.get(edge.target, mermaid_id(edge.target))
+            lines.append(edge_line(source, target, edge.label))
         for source in sorted(self.routers):
-            lines.append(f"    {source} -. router .-> {source}_route{{route}}")
+            ident = idents.get(source, mermaid_id(source))
+            lines.append(f'    {ident} -.->|"router"| {ident}_route{{route}}')
         if self.entry:
-            lines.insert(1, f'    __start__(("start")) --> {self.entry}')
+            lines.insert(1, f'    {idents["__start__"]}(("start")) --> {idents[self.entry]}')
         return "\n".join(lines)
 
 

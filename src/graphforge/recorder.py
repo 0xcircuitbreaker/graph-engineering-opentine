@@ -26,7 +26,16 @@ from opentine import Run, RunStatus, StepKind
 
 from ._version import __version__
 from .policy import GraphPolicy
-from .state import safe_json, sane_metric, sane_score, sane_usage, state_digest, to_jsonable
+from .state import (
+    clean_text,
+    safe_json,
+    sane_metric,
+    sane_score,
+    sane_usage,
+    slug,
+    state_digest,
+    to_jsonable,
+)
 
 DEFAULT_RUNS_DIR = Path("~/.local/share/graphforge").expanduser()
 
@@ -65,19 +74,21 @@ class GraphRecorder:
         else:
             manifest: dict[str, Any] = {
                 "kind": "graphforge",
-                "goal": goal,
-                "context": context,
+                "goal": clean_text(goal),
+                "context": clean_text(context),
                 "version": __version__,
             }
             if graph is not None:
-                manifest["graph"] = graph
+                manifest["graph"] = to_jsonable(graph)
             policies = {"graph": policy.to_dict()} if policy else {}
             self.run = Run(
                 manifest=manifest,
                 status=RunStatus.running,
-                user_prompt=goal,
+                user_prompt=clean_text(goal),
                 policies=policies,
             )
+            if policy is not None:
+                self._apply_budget(policy)
 
     # ------------------------------------------------------------------ fork
 
@@ -101,7 +112,9 @@ class GraphRecorder:
         silently overwrite each other's artifact).
         """
         manifest = parent_run.manifest if isinstance(parent_run.manifest, dict) else {}
-        new_run_id = f"{parent_run.run_id[:12]}-{branch}-{uuid4().hex[:8]}"
+        # slug(): the run id becomes a file name, and branch is caller- and
+        # MCP-supplied, so a path separator here would escape runs_dir.
+        new_run_id = f"{parent_run.run_id[:12]}-{slug(branch)}-{uuid4().hex[:8]}"
         forked = parent_run.fork(
             from_step_id=from_step_id, new_run_id=new_run_id, branch=branch
         )
@@ -150,7 +163,7 @@ class GraphRecorder:
     ) -> str:
         """Record one node execution as one step; returns the step id."""
         inputs: dict[str, Any] = {
-            "node": node_id,
+            "node": clean_text(node_id),
             "visit": visit,
             "edge": safe_json(edge) if edge else {"kind": "entry"},
         }
@@ -193,25 +206,54 @@ class GraphRecorder:
         usage: dict[str, Any] | None = None,
         parent_id: str | None = None,
         node_id: str | None = None,
+        provider: str | None = None,
+        effective_at: Any = None,
+        service_tier: str | None = None,
     ) -> str:
-        """Record a model invocation (nested under a node step when given)."""
+        """Record a model invocation (nested under a node step when given).
+
+        When ``provider`` is given and the installed opentine can price the
+        call, the step carries a full billing record — catalog id, rate-card
+        id, and an explicit complete/partial/unknown status — instead of an
+        unattributed cost float. Pricing never fails the recording.
+        """
         self._call_counter += 1
         # call_index keeps identical repeated calls content-address-unique.
         inputs: dict[str, Any] = {
-            "model": model,
+            "model": clean_text(model),
             "prompt": safe_json(prompt),
             "call_index": self._call_counter,
         }
         if node_id:
-            inputs["node"] = node_id
+            inputs["node"] = clean_text(node_id)
+        priced: dict[str, Any] = {}
+        outputs: dict[str, Any] = {"response": safe_json(response)}
+        if provider:
+            from .pricing import billing_fields, price_call, pricing_note
+
+            result = price_call(
+                provider,
+                model,
+                usage,
+                effective_at=effective_at,
+                service_tier=service_tier,
+            )
+            priced = billing_fields(result)
+            note = pricing_note(result)
+            if note is not None:
+                # Pricing was attempted and came back unknown; say so rather
+                # than letting a zero subtotal overwrite the caller's cost.
+                outputs["pricing"] = note
         return self._add(
             StepKind.model,
             inputs=inputs,
-            outputs={"response": safe_json(response)},
+            outputs=outputs,
             parent_id=parent_id,
             duration=duration,
-            cost=cost,
+            cost=priced.get("cost", cost),
             usage=usage,
+            model_info=clean_text(model) or None,
+            billing=priced.get("billing"),
         )
 
     def record_tool_call(
@@ -228,12 +270,12 @@ class GraphRecorder:
     ) -> str:
         self._call_counter += 1
         inputs: dict[str, Any] = {
-            "tool": name,
+            "tool": clean_text(name),
             "args": safe_json(args),
             "call_index": self._call_counter,
         }
         if node_id:
-            inputs["node"] = node_id
+            inputs["node"] = clean_text(node_id)
         outputs: dict[str, Any] = {"result": safe_json(result)}
         if error:
             outputs["error"] = safe_json(error)
@@ -244,6 +286,7 @@ class GraphRecorder:
             parent_id=parent_id,
             duration=duration,
             cost=cost,
+            tool_info={"name": clean_text(name)},
         )
 
     def record_checkpoint(
@@ -257,9 +300,12 @@ class GraphRecorder:
         parent_id: str | None = None,
     ) -> str:
         """Record an externally-created checkpoint as a forkable marker step."""
-        inputs: dict[str, Any] = {"checkpoint": checkpoint_id, "source": source}
+        inputs: dict[str, Any] = {
+            "checkpoint": clean_text(checkpoint_id),
+            "source": clean_text(source),
+        }
         if parent_checkpoint_id:
-            inputs["parent_checkpoint"] = parent_checkpoint_id
+            inputs["parent_checkpoint"] = clean_text(parent_checkpoint_id)
         if step is not None:
             inputs["step"] = step
         outputs: dict[str, Any] | None = None
@@ -272,13 +318,15 @@ class GraphRecorder:
     def record_gate(
         self, gate: str, detail: dict[str, Any] | None = None, *, parent_id: str | None = None
     ) -> str:
-        """Record a policy gate (budget breach, prune, cycle guard) honestly."""
-        tag = f"gate:{gate}"
-        if tag not in self.run.tags:
-            self.run.tags.append(tag)
+        """Record a policy gate (budget breach, prune, cycle guard) honestly.
+
+        The gate also lands in the step body, which the integrity digest and
+        any signature cover — tags are outside both and can be stripped.
+        """
+        self.add_tag(f"gate:{gate}")
         return self._add(
             StepKind.think,
-            inputs={"gate": gate, "detail": safe_json(detail or {})},
+            inputs={"gate": clean_text(str(gate)), "detail": safe_json(detail or {})},
             outputs=None,
             parent_id=parent_id,
         )
@@ -306,6 +354,9 @@ class GraphRecorder:
             inputs={"error": safe_json(message), "error_type": kind_name},
             outputs=None,
             parent_id=parent_id,
+            # Step.error is first-class in both 0.2.0 and 0.3.0; without it
+            # opentine's tooling cannot tell a failure from a think step.
+            error={"type": kind_name, "message": safe_json(message)},
         )
         self.run.status = RunStatus.failed
         self._finished = True
@@ -314,6 +365,53 @@ class GraphRecorder:
     @property
     def finished(self) -> bool:
         return self._finished
+
+    def add_tag(self, tag: str) -> None:
+        """Add a run tag, preferring opentine's normalizing ``add_tag``.
+
+        The v3 repository's annotation writer rejects non-string tags *after*
+        writing every event object, so normalization matters. Tags live
+        outside the integrity digest and outside the signature's metadata
+        allowlist — anything that must be tamper-evident also goes in a step
+        body, never in a tag alone.
+        """
+        cleaned = clean_text(str(tag))
+        adder = getattr(self.run, "add_tag", None)
+        if callable(adder):
+            adder(cleaned)
+            return
+        if cleaned not in self.run.tags:  # pragma: no cover - 0.2.0 fallback
+            self.run.tags.append(cleaned)
+
+    def _apply_budget(self, policy: GraphPolicy) -> None:
+        """Declare the policy's ceilings as an opentine Budget.
+
+        graphforge enforces its own budgets, but recording them in
+        ``manifest.budget`` (inside the digest) is what lets ``tine cost``,
+        the run index, and any v3 consumer see that the run was governed.
+        """
+        setter = getattr(self.run, "set_budget", None)
+        if not callable(setter):  # pragma: no cover - defensive
+            return
+        kwargs: dict[str, Any] = {}
+        # Explicit coercion: 0.3.0 validates budget dimensions that 0.2.0
+        # accepted, and GraphPolicy fields are unvalidated (JSON may hold 3.0).
+        if policy.max_total_cost is not None:
+            kwargs["max_cost"] = float(policy.max_total_cost)
+        # Deliberately NOT mapping max_node_executions onto max_steps:
+        # opentine counts every recorded step (gate steps, the terminal step,
+        # nested model/tool calls) while graphforge counts node executions
+        # only, so the run would self-report as over budget. The node cap
+        # stays in run.policies["graph"], where a graph-aware reader finds it.
+        if policy.max_duration_seconds is not None:
+            kwargs["max_duration"] = float(policy.max_duration_seconds)
+        if not kwargs:
+            return
+        try:
+            setter(on_breach="stop", **kwargs)
+        except (ValueError, TypeError):
+            # A nonsensical policy must not stop the run from being recorded.
+            pass
 
     def _add(
         self,
@@ -326,6 +424,10 @@ class GraphRecorder:
         duration: float = 0.0,
         cost: float = 0.0,
         usage: dict[str, Any] | None = None,
+        model_info: str | None = None,
+        tool_info: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+        billing: dict[str, Any] | None = None,
     ) -> str:
         kwargs: dict[str, Any] = {
             "inputs": inputs,
@@ -336,6 +438,19 @@ class GraphRecorder:
         clean_usage = sane_usage(usage)
         if clean_usage:
             kwargs["usage"] = clean_usage
+        # model_info/tool_info drive opentine's cost-by-model breakdown, its
+        # run index, and v3 search; without them every step is one anonymous
+        # bucket. Both kwargs exist in 0.2.0 and 0.3.0.
+        if model_info:
+            kwargs["model_info"] = model_info
+        if tool_info:
+            kwargs["tool_info"] = tool_info
+        if error:
+            kwargs["error"] = error
+        if billing:
+            # add_step(billing=) is 0.3.0-only; on 0.2.0 it is a TypeError,
+            # and the pricing layer never produces a record there anyway.
+            kwargs["billing"] = billing
         if parent_ids:
             kwargs["parent_ids"] = parent_ids
         else:
@@ -346,16 +461,56 @@ class GraphRecorder:
 
     # ------------------------------------------------------------------ save
 
-    def save(self, path: str | Path | None = None) -> Path:
+    def _target(self, path: str | Path | None) -> Path:
         target = Path(path).expanduser() if path else self.runs_dir / f"{self.run_id}.tine"
         if target.is_dir():
             # opentine silently switches to v3 repository mode for directory
             # targets (and would advance the repo's heads/main); require an
-            # explicit file path so that never happens by accident.
+            # explicit file path so that never happens by accident. Use
+            # graphforge.repo_backend to write into a repository on purpose.
             raise ValueError(
                 f"save target {target} is a directory; pass a .tine file path "
-                "(use opentine Repo APIs to write into a repository)"
+                "(use graphforge.repo_backend.save_to_repo for a v3 repository)"
             )
         target.parent.mkdir(parents=True, exist_ok=True)
-        self.path = self.run.save(target)
+        return target
+
+    def save(
+        self,
+        path: str | Path | None = None,
+        *,
+        sign_key: bytes | str | None = None,
+        sign_algorithm: str = "hmac-sha256",
+        key_id: str | None = None,
+        signer: str | None = None,
+    ) -> Path:
+        """Write the run as a portable ``.tine`` file, optionally signed.
+
+        Signing covers the run body plus opentine's ten-key metadata
+        allowlist. Tags are NOT covered — anything that must be
+        tamper-evident is recorded in a step body as well.
+        """
+        target = self._target(path)
+        kwargs: dict[str, Any] = {}
+        if sign_key is not None:
+            kwargs["sign_key"] = sign_key
+            kwargs["sign_algorithm"] = sign_algorithm
+            if key_id is not None:
+                kwargs["key_id"] = key_id
+            if signer is not None:
+                kwargs["signer"] = signer
+        self.path = self.run.save(target, **kwargs)
+        return self.path
+
+    def pause(self, path: str | Path | None = None) -> Path:
+        """Park the run as paused so opentine tooling can resume it.
+
+        A graph waiting on a human-in-the-loop checkpoint is otherwise
+        indistinguishable from a completed one.
+        """
+        target = self._target(path)
+        self.run.status = RunStatus.paused
+        self._finished = True
+        pauser = getattr(self.run, "pause", None)
+        self.path = pauser(target) if callable(pauser) else self.run.save(target)
         return self.path

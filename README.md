@@ -12,9 +12,10 @@ Sibling of [`loop-engineering-opentine`](https://github.com/0xcircuitbreaker/loo
 - `GraphRecorder` — the single opentine integration point (one file to touch on opentine upgrades).
 - `GraphRunCapture` — the universal push-based adapter: record **any** external graph framework (LangGraph, Burr, CrewAI Flows, LlamaIndex Workflows, pydantic-graph, homegrown engines) via `node_start` / `node_end` / `model_call` / `tool_call` / `edge` / `end` events. Never-throw discipline: recorder failures never break the host.
 - Shipped adapters — all zero-change attach points, all import-safe without their framework: **LangGraph** (checkpointer wrapper + callback handler), **Burr** (lifecycle hook), **CrewAI Flows** (event-bus listener with per-flow isolation), **LlamaIndex Workflows** (checkpoint conversion), **pydantic-graph V2** (`graph.iter()` driver with `fork_stack` lineage).
-- Zero-glue ingestion for everything else: `ingest_otel_spans` (OTel GenAI semantic conventions) and `ingest_jsonl` (plain JSON-lines event streams).
-- `GraphPolicy` — **run-wide** budgets: node executions, total cost, wall clock, cycle guard (`max_visits_per_node`), success threshold.
-- CLI + MCP server for running demos and listing/showing/diffing/forking artifacts.
+- Zero-glue ingestion for everything else: raw OTLP/JSON GenAI exports, opentine `TraceEvent` streams, raw framework callback records (langchain / llamaindex / autogen / crewai / openai-agents), and plain JSON-lines event streams.
+- **v3 repository support** (opentine 0.3.0): persist runs as content-addressed objects with CAS refs, evaluation attestations, release-gate promotion, and search — plus a graph-layer `graph_diff` that opentine's step-level diffs cannot express.
+- `GraphPolicy` — **run-wide** budgets: node executions, total cost, wall clock, cycle guard (`max_visits_per_node`), success threshold — also declared as an opentine `Budget`.
+- CLI + MCP server for running demos, inspecting/diffing/forking artifacts, and driving a v3 repository (composed with opentine's own repository tools).
 
 ## Why opentine under a graph framework
 
@@ -27,7 +28,7 @@ cd graph-engineering-opentine
 pip install -e ".[cli,mcp]"
 ```
 
-Requires Python >= 3.11 and `opentine>=0.2.0,<0.4` (tested against 0.2.0 and 0.3.0).
+Requires Python >= 3.11 and `opentine>=0.2.0,<0.4`. The full suite runs against **both** opentine 0.2.0 and 0.3.0; 0.3.0-only features (v3 repositories, priced billing) degrade cleanly and their tests skip on 0.2.0.
 
 ## Quick start
 
@@ -188,25 +189,112 @@ Drives `graph.iter()` — nodes execute exactly as they would; every scheduled `
 
 ## Zero-glue ingestion (no adapter needed)
 
-Any setup that can produce OTel GenAI spans or append JSON lines gets recording with no Python integration:
+Four paths for setups with no dedicated adapter — no Python integration required:
 
 ```python
-from graphforge import ingest_otel_spans, ingest_jsonl
+import json
 
-# OTel GenAI semantic conventions: invoke_agent -> nodes, chat -> model
-# calls, execute_tool -> tool calls, attributed via the span parent tree
-ingest_otel_spans("traced run", spans)
+from graphforge import (ingest_otel_spans, ingest_jsonl,
+                        ingest_trace_events, ingest_framework)
 
-# lowest common denominator: JSONL events
-# {"type": "node_start"|"node_end"|"model_call"|"tool_call"|"edge"|
-#  "checkpoint"|"error"|"end", ...}
+# 1. OTel GenAI semantic conventions. Accepts a raw OTLP/JSON export
+#    (resourceSpans/scopeSpans/spans, list-form attributes, camelCase ids,
+#    nanosecond epochs) or an already-extracted span list.
+#    invoke_agent -> nodes, chat -> model calls, execute_tool -> tool calls,
+#    attributed through the span parent tree; links[] become fan-in parents.
+ingest_otel_spans("traced run", json.load(open("otlp-export.json")))
+
+# 2. opentine's own normalized TraceEvent stream, replayed as a graph
+#    (multi-parent fan-in via parent_span_id + causal_span_ids).
+ingest_trace_events("trace run", events)
+
+# 3. Raw framework callback records, via opentine's own importers:
+#    langchain, llamaindex, autogen, crewai, openai-agents.
+ingest_framework("chain run", records, "langchain")
+
+# 4. Lowest common denominator: JSONL events
+#    {"type": "node_start"|"node_end"|"model_call"|"tool_call"|"edge"|
+#     "checkpoint"|"error"|"end", ...}
 ingest_jsonl("logged run", "events.jsonl")
 ```
 
 ```bash
-graphforge ingest-otel spans.json
+graphforge ingest-otel otlp-export.json
 graphforge ingest-jsonl events.jsonl
 ```
+
+Paths 2 and 3 need opentine >= 0.3.0 and raise a clear error otherwise; 1 and 4 work on both versions, using opentine's OTLP decoder when present and an equivalent pure-Python fallback when not.
+
+## v3 repositories (opentine 0.3.0)
+
+opentine 0.3.0 added a Git-shaped, content-addressed object store alongside portable `.tine` files. graphforge supports both. A repository gives a graph run what a file cannot: deduplicated storage (a fork re-stores only new events), a real on-disk DAG whose typed links preserve fan-in lineage, compare-and-swap refs, and `attest`/`promote` as a tamper-evident release gate.
+
+```python
+from graphforge import GraphEngine, open_repo, save_to_repo, evaluate, candidates, promote
+
+repo = open_repo("~/graphs", create=True)
+result = GraphEngine(my_graph).run(goal="ship it", initial_state={})
+
+stored = save_to_repo(result.recorder, repo, ref="experiments/run-42")
+evaluate(repo, stored["run_id"], {"gate": 0.93}, signer="ci")   # now searchable
+best = candidates(repo, min_score=0.9, model="claude-sonnet-5")
+promote(repo, stored["run_id"], "prod", signer="ci")            # CAS release gate
+```
+
+```bash
+graphforge repo-init .
+graphforge repo-save <run-id> --repo . --ref experiments/run-42
+graphforge repo-evaluate <run-oid> --score 0.93 --signer ci --repo .
+graphforge repo-candidates --min-score 0.9 --repo .
+graphforge repo-promote <run-oid> prod --signer ci --repo .
+graphforge repo-status --repo .
+```
+
+Deliberate guardrails, each covering a verified failure mode:
+
+- graphforge writes only `experiments/*`, `heads/graphforge/*`, and `tags/*`. Mainline heads and `promotions/*` are explicit operator actions, never a side effect of recording.
+- `save_to_repo` never uses `put_run(ref=...)` — that is a read-then-swap which can clobber a head written a moment earlier — and instead does its own `update_ref` with `expected_old`, so you choose blind-write / must-not-exist / compare-and-swap.
+- Tags and step counts are checked *before* writing, because `put_run` validates them only after every event object is already stored.
+- `evaluate` validates the claim first: opentine accepts a non-dict claim and then `repo.diff` raises on that repository forever, with no undo. Emit **one metric per attestation** — a claim is scored by the mean of its `scores` dict, so mixing a pass rate with a cost is meaningless.
+
+### Graph-layer diff
+
+opentine's diffs work at the step layer, and a v3 event's identity includes its timestamp — so two behaviourally identical runs share zero events and everything reads as changed. `graph_diff` compares what actually distinguishes two *graph* runs:
+
+```python
+from graphforge import graph_diff
+diff = graph_diff(left_run, right_run)
+# identical_path, first_divergence, edges_only_left/right, visit_delta,
+# score_drift, topology_match
+```
+
+```bash
+graphforge graph-diff <left> <right>
+```
+
+## Provenance: signing, priced billing, budgets
+
+```python
+recorder.save(sign_key=key, signer="ci", key_id="k1")   # tamper evidence
+```
+
+```bash
+graphforge verify run.tine --hmac-key "$KEY"    # integrity AND signature
+```
+
+Integrity is a checksum — it proves the file was not corrupted, not that nobody rewrote it. Only a signature is tamper evidence, and even a signature covers the run body plus **ten** allowlisted metadata keys: run **tags are outside it**. That is why every graphforge safety signal (`gate:*`, topology drift, unresolved joins) is recorded as a *step* as well as a tag — the step body is inside the digest and the signature.
+
+Model calls can be priced against opentine's signed rate-card catalog instead of carrying an unattributed float:
+
+```python
+recorder.record_model_call(model="claude-sonnet-5", provider="anthropic",
+                           usage={"prompt_tokens": 1000, "completion_tokens": 500})
+# -> step.billing carries status/catalog_id/rate_card_id; cost is computed
+```
+
+Provider-native usage names (`prompt_tokens`, `completion_tokens`, `cache_read_input_tokens`, …) are normalized onto opentine's dimensions, so token totals and cost breakdowns are non-zero. If a model cannot be priced, your own cost figure is kept and the failed attempt is recorded — an unknown billing record would otherwise zero it, since opentine prefers a step's billing subtotal over its cost.
+
+`GraphPolicy` limits are also declared as an opentine `Budget` in `manifest.budget`, so `tine cost` and any v3 consumer can see the ceilings that governed the run.
 
 ## Policy
 
@@ -240,6 +328,9 @@ Tools: `list_graph_runs`, `show_graph_run`, `show_graph_topology` (topology + tr
 - `src/graphforge/adapters/` — LangGraph, Burr, CrewAI Flows, LlamaIndex Workflows, pydantic-graph.
 - `src/graphforge/ingest.py` — OTel GenAI span + JSONL event ingestion.
 - `src/graphforge/models.py` — model adapters + fence-safe JSON node builder.
+- `src/graphforge/repo_backend.py` — v3 repository persistence, attest/promote/search (the only module importing `Repo`).
+- `src/graphforge/diffing.py` — graph-layer diff (path, edges, visits, score drift).
+- `src/graphforge/pricing.py` — priced model calls against opentine's rate-card catalog.
 - `src/graphforge/policy.py` — run-wide budgets.
 - `src/graphforge/examples.py` — deterministic offline demo graphs.
 - `src/graphforge/cli.py`, `src/graphforge/mcp_server.py` — operator surfaces.

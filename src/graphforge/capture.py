@@ -28,7 +28,7 @@ from typing import Any
 
 from .policy import GraphPolicy
 from .recorder import GraphRecorder
-from .state import safe_json, state_delta
+from .state import clean_text, safe_json, state_delta
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class GraphRunCapture:
             if framework:
                 manifest = self._recorder.run.manifest
                 if isinstance(manifest, dict):
-                    manifest["framework"] = framework
+                    manifest["framework"] = clean_text(framework)
         except Exception:
             if strict:
                 raise
@@ -308,11 +308,15 @@ class GraphRunCapture:
             if elapsed is None:
                 elapsed = time.monotonic() - open_node.started if open_node else 0.0
             edge = open_node.edge if open_node else self._pending_edges.pop(node_id, None)
-            parent_ids = parents if parents and len(parents) > 1 else None
+            # Dedupe: opentine's v3 store rejects repeated parent_ids, and
+            # a framework can legitimately report the same parent twice.
+            # A new name, not a rebind: `parents` is a closure variable.
+            unique_parents = list(dict.fromkeys(parents)) if parents else []
+            parent_ids = unique_parents if len(unique_parents) > 1 else None
             parent_id = None
             if not parent_ids:
-                if parents:
-                    parent_id = parents[0]
+                if unique_parents:
+                    parent_id = unique_parents[0]
                 elif open_node is not None and open_node.parent_step:
                     parent_id = open_node.parent_step
                 elif edge and edge.get("source") in self._node_tips:
