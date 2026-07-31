@@ -282,7 +282,7 @@ recorder.save(sign_key=key, signer="ci", key_id="k1")   # tamper evidence
 graphforge verify run.tine --hmac-key "$KEY"    # integrity AND signature
 ```
 
-Integrity is a checksum — it proves the file was not corrupted, not that nobody rewrote it. Only a signature is tamper evidence, and even a signature covers the run body plus **ten** allowlisted metadata keys: run **tags are outside it**. That is why every graphforge safety signal (`gate:*`, topology drift, unresolved joins) is recorded as a *step* as well as a tag — the step body is inside the digest and the signature.
+Integrity is a checksum — it proves the file was not corrupted, not that nobody rewrote it. Only a signature is tamper evidence, and even a signature covers the run body plus an allowlist of metadata keys whose membership depends on the opentine version (it grew in 0.4.0). Run **tags are outside it in every version**. That is why every graphforge safety signal (`gate:*`, topology drift, unresolved joins) is recorded as a *step* as well as a tag — the step body is inside the digest and the signature.
 
 Model calls can be priced against opentine's signed rate-card catalog instead of carrying an unattributed float:
 

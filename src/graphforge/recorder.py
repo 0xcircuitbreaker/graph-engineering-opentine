@@ -81,6 +81,7 @@ def fork_run(
     unique = f"{parent_run.run_id[:12]}-{slug(branch)}-{uuid4().hex[:8]}"
     return parent_run.fork(from_step_id=from_step_id, new_run_id=unique, branch=branch)
 
+
 _KIND_MAP = {
     "model": StepKind.model,
     "tool": StepKind.tool,
@@ -522,9 +523,10 @@ class GraphRecorder:
     ) -> Path:
         """Write the run as a portable ``.tine`` file, optionally signed.
 
-        Signing covers the run body plus opentine's ten-key metadata
-        allowlist. Tags are NOT covered — anything that must be
-        tamper-evident is recorded in a step body as well.
+        Signing covers the run body plus opentine's metadata allowlist,
+        whose membership is version-dependent (it grew in 0.4.0). Tags are
+        NOT covered in any version — anything that must be tamper-evident is
+        recorded in a step body as well.
         """
         target = self._target(path)
         kwargs: dict[str, Any] = {}
