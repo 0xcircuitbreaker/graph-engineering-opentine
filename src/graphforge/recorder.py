@@ -39,6 +39,48 @@ from .state import (
 
 DEFAULT_RUNS_DIR = Path("~/.local/share/graphforge").expanduser()
 
+
+def _fork_mints_unique_ids() -> bool:
+    """Whether opentine's own ``Run.fork`` yields a distinct id per fork act.
+
+    opentine 0.4.0 derives a fork id from the source lineage, the retained
+    slice, the branch, a declared intent, and a random nonce, and records
+    that basis so the fork can prove its own id. Before 0.4.0 the id was a
+    pure function of (parent, fork point), so two forks at one point
+    collided — and saving the second silently destroyed the first.
+    """
+    import inspect
+
+    try:
+        return "nonce" in inspect.signature(Run.fork).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return False
+
+
+def fork_run(
+    parent_run: Run,
+    from_step_id: str,
+    *,
+    branch: str = "fork",
+    intent: dict[str, Any] | None = None,
+) -> Run:
+    """Fork a run so the result is always uniquely identified.
+
+    On opentine 0.4.0+ this defers to opentine, which mints a unique id AND
+    records a verifiable fork basis. On older versions it supplies its own
+    unique id, because the native id would collide.
+    """
+    if _fork_mints_unique_ids():
+        declared = {"tool": "graphforge", "branch": clean_text(branch)}
+        if intent:
+            declared.update({str(k): v for k, v in intent.items()})
+        return parent_run.fork(
+            from_step_id=from_step_id, branch=branch, intent=to_jsonable(declared)
+        )
+    # slug(): the id becomes a file name and branch is caller/MCP-supplied.
+    unique = f"{parent_run.run_id[:12]}-{slug(branch)}-{uuid4().hex[:8]}"
+    return parent_run.fork(from_step_id=from_step_id, new_run_id=unique, branch=branch)
+
 _KIND_MAP = {
     "model": StepKind.model,
     "tool": StepKind.tool,
@@ -107,17 +149,11 @@ class GraphRecorder:
     ) -> GraphRecorder:
         """Fork an existing run at a step and return a recorder over the fork.
 
-        The fork gets a unique run id (opentine's default is deterministic
-        from parent + fork point, so two forks at the same step would
-        silently overwrite each other's artifact).
+        The fork is always uniquely identified — see :func:`fork_run` for how
+        that is achieved on each opentine version.
         """
         manifest = parent_run.manifest if isinstance(parent_run.manifest, dict) else {}
-        # slug(): the run id becomes a file name, and branch is caller- and
-        # MCP-supplied, so a path separator here would escape runs_dir.
-        new_run_id = f"{parent_run.run_id[:12]}-{slug(branch)}-{uuid4().hex[:8]}"
-        forked = parent_run.fork(
-            from_step_id=from_step_id, new_run_id=new_run_id, branch=branch
-        )
+        forked = fork_run(parent_run, from_step_id, branch=branch)
         forked.status = RunStatus.running
         recorder = cls(
             goal=goal or str(manifest.get("goal", "")),

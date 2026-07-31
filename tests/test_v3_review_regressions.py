@@ -230,6 +230,66 @@ def test_budget_does_not_claim_a_step_ceiling(tmp_path):
     assert run.policies["graph"]["max_node_executions"] == 3
 
 
+# --- opentine 0.4.0: per-act fork identity ------------------------------------
+
+
+def _native_fork_identity() -> bool:
+    from graphforge.recorder import _fork_mints_unique_ids
+
+    return _fork_mints_unique_ids()
+
+
+def test_forks_are_unique_on_every_opentine_version(tmp_path):
+    """Before 0.4.0 the id was a pure function of (parent, fork point), so the
+    second fork's save silently destroyed the first."""
+    from graphforge.mcp_server import fork_run as mcp_fork
+
+    result = GraphEngine(fanout_graph(), runs_dir=tmp_path).run(
+        goal="q", initial_state={"question": "q"}
+    )
+    run = Run.load(result.artifact)
+    step = next(sid for sid in run.graph.order if (run.graph.steps[sid].inputs or {}).get("node"))
+    first = mcp_fork(result.run_id, step[:12], "same-branch", str(tmp_path))
+    second = mcp_fork(result.run_id, step[:12], "same-branch", str(tmp_path))
+    assert first["run_id"] != second["run_id"]
+    assert first["path"] != second["path"]
+    assert Run.load(first["path"]) and Run.load(second["path"])
+
+
+@pytest.mark.skipif(
+    not _native_fork_identity(), reason="per-act fork identity needs opentine>=0.4.0"
+)
+def test_forks_carry_a_verifiable_basis_on_0_4_0(tmp_path):
+    """Supplying our own new_run_id would discard the fork basis, so the
+    workaround must NOT be used where opentine mints a verifiable id."""
+    from opentine._fork_identity import verify_fork_id
+
+    from graphforge.mcp_server import fork_run as mcp_fork
+
+    result = GraphEngine(fanout_graph(), runs_dir=tmp_path).run(
+        goal="q", initial_state={"question": "q"}
+    )
+    run = Run.load(result.artifact)
+    step = next(sid for sid in run.graph.order if (run.graph.steps[sid].inputs or {}).get("node"))
+    forked = Run.load(mcp_fork(result.run_id, step[:12], "b", str(tmp_path))["path"])
+    assert verify_fork_id(forked) is True
+    assert (forked.metadata.get("fork") or {}).get("intent")
+
+
+@pytest.mark.skipif(
+    not _native_fork_identity(), reason="per-act fork identity needs opentine>=0.4.0"
+)
+def test_engine_resume_fork_is_verifiable(tmp_path):
+    from opentine._fork_identity import verify_fork_id
+
+    engine = GraphEngine(fanout_graph(), runs_dir=tmp_path)
+    original = engine.run(goal="q", initial_state={"question": "q"})
+    resumed = engine.resume(
+        original.artifact, original.path[0]["step_id"], start_node="research_a"
+    )
+    assert verify_fork_id(Run.load(resumed.artifact)) is True
+
+
 # --- minor: run handles accept a ref, as documented ----------------------------
 
 

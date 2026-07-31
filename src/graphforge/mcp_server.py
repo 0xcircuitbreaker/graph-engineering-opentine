@@ -27,7 +27,6 @@ from dataclasses import asdict, is_dataclass
 from itertools import islice
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from opentine import Run
 
@@ -36,7 +35,8 @@ from .diffing import graph_diff
 from .mermaid import mermaid_ids as _mermaid_ids
 from .mermaid import mermaid_label as _mermaid_label
 from .recorder import DEFAULT_RUNS_DIR
-from .state import safe_json, slug
+from .recorder import fork_run as fork_recorder_run
+from .state import safe_json
 
 _LOG = logging.getLogger(__name__)
 
@@ -483,11 +483,10 @@ def fork_run(
         raise ValueError(
             f"step {from_step!r} is {'ambiguous' if matches else 'not found'} in {run.run_id}"
         )
-    # Unique run id: opentine's default fork id is deterministic from
-    # (parent, fork point), so two forks at the same step would overwrite
-    # each other's artifact.
-    new_run_id = f"{run.run_id[:12]}-{slug(branch)}-{uuid4().hex[:8]}"
-    forked = run.fork(from_step_id=matches[0], new_run_id=new_run_id, branch=branch)
+    # Always uniquely identified: opentine 0.4.0 mints a verifiable per-act
+    # fork id; before that its id was a pure function of (parent, fork point)
+    # and the second fork's save silently destroyed the first.
+    forked = fork_recorder_run(run, matches[0], branch=branch, intent={"via": "mcp"})
     # Write into the runs dir itself (never path.parent): the source may sit
     # in a subdirectory, and list_runs only globs the top level.
     target = base / f"{forked.run_id}.tine"
