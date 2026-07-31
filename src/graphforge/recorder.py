@@ -57,6 +57,29 @@ def _fork_mints_unique_ids() -> bool:
         return False
 
 
+def verify_fork_identity(run: Run) -> bool | None:
+    """Does a fork's id match the basis the artifact records?
+
+    ``True``  — the id is exactly what ``metadata["fork"]`` re-derives.
+    ``False`` — a basis is recorded but does not produce the id (edited).
+    ``None``  — no verdict: not a fork, a pre-0.4.0 fork, an explicitly named
+    ``new_run_id``, or an opentine too old to have the check at all.
+
+    This is provenance, not authorization: an artifact's author can always
+    make their own artifact self-consistent. It exists here so callers do not
+    have to import opentine's private module, which is where the check still
+    lives as of 0.4.0.
+    """
+    try:
+        from opentine._fork_identity import verify_fork_id
+    except ImportError:  # opentine < 0.4.0
+        return None
+    try:
+        return verify_fork_id(run)
+    except Exception:  # noqa: BLE001 - a provenance check must not raise
+        return None
+
+
 def fork_run(
     parent_run: Run,
     from_step_id: str,

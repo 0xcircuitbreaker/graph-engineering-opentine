@@ -28,7 +28,7 @@ cd graph-engineering-opentine
 pip install -e ".[cli,mcp]"
 ```
 
-Requires Python >= 3.11 and `opentine>=0.2.0,<0.5`. The full suite runs against opentine 0.2.0, 0.3.0 and 0.4.0. Newer-only features (v3 repositories, priced billing, per-act fork identity) degrade cleanly and their tests skip on older versions.
+Requires Python >= 3.11 and `opentine>=0.2.0,<0.5`. The full suite runs against opentine 0.2.0, 0.3.0 and 0.4.0, and CI exercises all three. Newer-only features (v3 repositories, priced billing, per-act fork identity) degrade cleanly and their tests skip on older versions.
 
 ## Quick start
 

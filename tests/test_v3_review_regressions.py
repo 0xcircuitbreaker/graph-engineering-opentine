@@ -196,8 +196,11 @@ def test_anthropic_exclusive_usage_is_left_alone():
 
 
 def test_subtraction_never_goes_negative():
+    # Over-subtraction clamps at zero, and a zero canonical dimension is
+    # dropped entirely — matching opentine's own compact serialization.
     usage = sane_usage({"prompt_tokens": 10, "cached_tokens": 999})
-    assert usage["input"] == 0
+    assert usage.get("input", 0) == 0
+    assert all(v >= 0 for v in usage.values())
 
 
 def test_usage_dimension_names_are_cleaned():
@@ -262,8 +265,7 @@ def test_forks_are_unique_on_every_opentine_version(tmp_path):
 def test_forks_carry_a_verifiable_basis_on_0_4_0(tmp_path):
     """Supplying our own new_run_id would discard the fork basis, so the
     workaround must NOT be used where opentine mints a verifiable id."""
-    from opentine._fork_identity import verify_fork_id
-
+    from graphforge import verify_fork_identity
     from graphforge.mcp_server import fork_run as mcp_fork
 
     result = GraphEngine(fanout_graph(), runs_dir=tmp_path).run(
@@ -272,7 +274,7 @@ def test_forks_carry_a_verifiable_basis_on_0_4_0(tmp_path):
     run = Run.load(result.artifact)
     step = next(sid for sid in run.graph.order if (run.graph.steps[sid].inputs or {}).get("node"))
     forked = Run.load(mcp_fork(result.run_id, step[:12], "b", str(tmp_path))["path"])
-    assert verify_fork_id(forked) is True
+    assert verify_fork_identity(forked) is True
     assert (forked.metadata.get("fork") or {}).get("intent")
 
 
@@ -280,14 +282,14 @@ def test_forks_carry_a_verifiable_basis_on_0_4_0(tmp_path):
     not _native_fork_identity(), reason="per-act fork identity needs opentine>=0.4.0"
 )
 def test_engine_resume_fork_is_verifiable(tmp_path):
-    from opentine._fork_identity import verify_fork_id
+    from graphforge import verify_fork_identity
 
     engine = GraphEngine(fanout_graph(), runs_dir=tmp_path)
     original = engine.run(goal="q", initial_state={"question": "q"})
     resumed = engine.resume(
         original.artifact, original.path[0]["step_id"], start_node="research_a"
     )
-    assert verify_fork_id(Run.load(resumed.artifact)) is True
+    assert verify_fork_identity(Run.load(resumed.artifact)) is True
 
 
 # --- minor: run handles accept a ref, as documented ----------------------------
@@ -355,3 +357,34 @@ def test_verify_reports_an_unchecked_signature(tmp_path):
     # signed-but-unverified must be greppable, not identical to unsigned
     assert payload["signature_present"] is True
     assert payload["signature_checked"] is False
+
+
+# --- opentine 0.4.0: fork provenance is reachable without private imports ------
+
+
+def test_verify_fork_identity_is_a_public_helper(tmp_path):
+    """opentine keeps verify_fork_id private, so graphforge wraps it: callers
+    should never have to import opentine._fork_identity themselves."""
+    from graphforge import verify_fork_identity
+
+    engine = GraphEngine(fanout_graph(), runs_dir=tmp_path)
+    original = engine.run(goal="q", initial_state={"question": "q"})
+    # a run that was never forked has no verdict to give
+    assert verify_fork_identity(Run.load(original.artifact)) is None
+
+    resumed = engine.resume(
+        original.artifact, original.path[0]["step_id"], start_node="research_a"
+    )
+    verdict = verify_fork_identity(Run.load(resumed.artifact))
+    # True on opentine >= 0.4.0; None on older, where the check does not exist
+    assert verdict in (True, None)
+
+
+def test_verify_fork_identity_never_raises():
+    """A provenance check must be total on hostile input."""
+    from graphforge import verify_fork_identity
+
+    class NotARun:
+        metadata = "not-a-dict"
+
+    assert verify_fork_identity(NotARun()) is None

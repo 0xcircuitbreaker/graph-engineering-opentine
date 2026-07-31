@@ -205,24 +205,52 @@ TOKEN_DIMENSIONS = frozenset(
     {"input", "output", "cache_read", "cache_write_5m", "cache_write_1h", "reasoning", "total"}
 )
 
-#: Spellings whose INPUT count already contains the cache sub-buckets.
-#: OpenAI reports ``prompt_tokens`` inclusive of ``cached_tokens``; Anthropic
-#: reports ``input_tokens`` exclusive of them. opentine's dimensions are
-#: exclusive, so an inclusive spelling must have its sub-buckets subtracted
-#: or every cached token is counted twice — and priced twice.
-_INCLUSIVE_INPUT = frozenset({"prompt_tokens", "prompttokens"})
+#: Input spellings that already contain the cache sub-buckets.
+_INCLUSIVE_INPUT = frozenset(
+    {"prompt_tokens", "prompttokens", "prompt_token_count", "prompttokencount"}
+)
 
-#: Spellings whose OUTPUT count already contains reasoning/thinking tokens.
-#: Both OpenAI (``completion_tokens``) and Anthropic (``output_tokens``) do.
+#: OpenAI-family cache spellings. Their presence means the input count is
+#: inclusive whichever input spelling was used — the Responses API reports
+#: ``input_tokens`` with ``cached_tokens``, and opentine subtracts there too.
+#: Anthropic's ``cache_*_input_tokens`` deliberately stay out of this set.
+_OPENAI_CACHE = frozenset(
+    {
+        "cached_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "prompt_cache_hit_tokens",
+        "num_cached_tokens",
+    }
+)
+
+#: Output spellings that already contain reasoning/thinking tokens. Google's
+#: ``candidates_token_count`` is NOT one: it excludes thoughts.
 _INCLUSIVE_OUTPUT = frozenset(
     {"completion_tokens", "completiontokens", "output_tokens", "outputtokens"}
 )
 
-#: Provider- and framework-native spellings mapped onto those dimensions.
-#: Without this, a run recorded from an OpenAI/LangChain-shaped payload
-#: reports total_tokens == 0 and an all-zero cost breakdown, because opentine
-#: only counts dimensions it recognizes.
+#: Nested containers real SDKs put the sub-buckets in. They are flattened
+#: into the scalar namespace before mapping; without this the cached and
+#: reasoning counts are simply dropped.
+_DETAIL_CONTAINERS = (
+    "prompt_tokens_details",
+    "input_tokens_details",
+    "completion_tokens_details",
+    "output_tokens_details",
+    "cache_creation",
+)
+
+#: The OpenAI-family containers that break down an *inclusive* input count.
+#: A cache bucket sourced from one of these means the sibling input total
+#: already contains it — which is how opentine decides, and it is why
+#: provenance matters rather than the key name alone: Anthropic reports a
+#: top-level ``cache_creation_input_tokens`` whose input total EXCLUDES it, so
+#: keying on the name would wrongly subtract there.
+_OPENAI_INPUT_DETAILS = ("prompt_tokens_details", "input_tokens_details")
+
 USAGE_ALIASES = {
+    # OpenAI / OpenAI-compatible
     "prompt_tokens": "input",
     "prompttokens": "input",
     "input_tokens": "input",
@@ -231,18 +259,74 @@ USAGE_ALIASES = {
     "completiontokens": "output",
     "output_tokens": "output",
     "outputtokens": "output",
-    "cache_read_input_tokens": "cache_read",
-    "cachereadinputtokens": "cache_read",
-    "cache_read_tokens": "cache_read",
     "cached_tokens": "cache_read",
-    "cache_creation_input_tokens": "cache_write_5m",
-    "cachecreationinputtokens": "cache_write_5m",
+    "cachedtokens": "cache_read",
+    "prompt_cache_hit_tokens": "cache_read",
+    "num_cached_tokens": "cache_read",
+    "cache_read_tokens": "cache_read",
     "cache_write_tokens": "cache_write_5m",
     "reasoning_tokens": "reasoning",
     "reasoningtokens": "reasoning",
     "total_tokens": "total",
     "totaltokens": "total",
+    # Anthropic
+    "cache_read_input_tokens": "cache_read",
+    "cachereadinputtokens": "cache_read",
+    "cache_creation_input_tokens": "cache_write_5m",
+    "cachecreationinputtokens": "cache_write_5m",
+    "ephemeral_5m_input_tokens": "cache_write_5m",
+    "ephemeral_1h_input_tokens": "cache_write_1h",
+    "cache_write_1h_tokens": "cache_write_1h",
+    "thinking_tokens": "reasoning",
+    # Google (the lookup lowercases, so camelCase is keyed lowercased)
+    "prompt_token_count": "input",
+    "prompttokencount": "input",
+    "candidates_token_count": "output",
+    "candidatestokencount": "output",
+    "cached_content_token_count": "cache_read",
+    "cachedcontenttokencount": "cache_read",
+    "thoughts_token_count": "reasoning",
+    "thoughtstokencount": "reasoning",
+    "total_token_count": "total",
+    "totaltokencount": "total",
+    # Ollama (both already exclusive)
+    "prompt_eval_count": "input",
+    "eval_count": "output",
 }
+
+
+def _flatten_usage(usage: dict[Any, Any]) -> tuple[dict[str, Any], bool, set[str]]:
+    """Merge known nested detail containers into the scalar namespace.
+
+    Returns the flat mapping and whether an explicit 5m/1h cache-write split
+    was found — that split takes precedence over the flat
+    ``cache_creation_input_tokens`` total, which would otherwise be counted
+    as both buckets.
+
+    The split counts only when a bucket is actually non-zero. Anthropic sends
+    the container with both buckets at 0 alongside a populated flat total, and
+    treating its mere presence as authoritative discarded the whole
+    cache-write count — an undercount of the entire cached prefix. This
+    matches opentine's own ``anthropic_usage``, which falls back to the flat
+    total in exactly that case.
+    """
+    flat: dict[str, Any] = {}
+    split = False
+    from_input_details: set[str] = set()
+    for key, value in usage.items():
+        name = str(key)
+        if name.lower() in _DETAIL_CONTAINERS and isinstance(value, dict):
+            inclusive_container = name.lower() in _OPENAI_INPUT_DETAILS
+            for inner_key, inner in value.items():
+                inner_name = str(inner_key)
+                if inner_name.lower() in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"):
+                    split = split or bool(inner)
+                if inclusive_container:
+                    from_input_details.add(inner_name.lower())
+                flat.setdefault(inner_name, inner)
+            continue
+        flat[name] = value
+    return flat, split, from_input_details
 
 
 def sane_usage(usage: Any) -> dict[str, int | float] | None:
@@ -263,30 +347,51 @@ def sane_usage(usage: Any) -> dict[str, int | float] | None:
     """
     if not isinstance(usage, dict):
         return None
+    flat, explicit_cache_split, from_input_details = _flatten_usage(usage)
+
     out: dict[str, int | float] = {}
     inclusive_input = False
     inclusive_output = False
-    for raw_key, value in usage.items():
+    for raw_key, value in flat.items():
         if isinstance(value, bool) or not isinstance(value, int | float):
             continue
-        number = float(value)
-        if not math.isfinite(number) or number < 0:
+        try:
+            number = float(value)
+        except (OverflowError, ValueError):  # pragma: no cover - defensive
+            continue
+        if not math.isfinite(number) or number < 0 or number > MAX_SAFE_INT:
             continue
         key = clean_text(str(raw_key)).strip()
         if not key:
-            continue  # opentine rejects an empty dimension name outright
+            continue  # opentine rejects an empty dimension name
         lowered = key.lower()
         name = USAGE_ALIASES.get(lowered, key)
-        if number > MAX_SAFE_INT:
-            # Out of canonical-JSON range. Clamping would turn a plainly
-            # bogus count into a plausible one inside the digested step body;
-            # opentine's own importer discards such a dimension, so do that.
-            continue
         if name in TOKEN_DIMENSIONS:
             if lowered in _INCLUSIVE_INPUT:
                 inclusive_input = True
+            if lowered in _OPENAI_CACHE:
+                # OpenAI reports an inclusive input whichever spelling it used.
+                inclusive_input = True
+            if lowered in from_input_details and name in (
+                "cache_read",
+                "cache_write_5m",
+                "cache_write_1h",
+            ):
+                # A cache bucket broken out of an OpenAI input-details
+                # container is part of the sibling input total, whatever it is
+                # spelled. Without this, `input_tokens` alongside a nested
+                # `cache_creation_input_tokens` over-reported input by the
+                # whole cache-write count.
+                inclusive_input = True
             if lowered in _INCLUSIVE_OUTPUT:
                 inclusive_output = True
+            if (
+                explicit_cache_split
+                and lowered in ("cache_creation_input_tokens", "cachecreationinputtokens")
+            ):
+                # The nested 5m/1h split is authoritative; the flat total
+                # would otherwise land in cache_write_5m on top of it.
+                continue
             merged = int(number)
             # Two spellings can land on one dimension; keep the larger rather
             # than letting declaration order decide.
@@ -301,6 +406,10 @@ def sane_usage(usage: Any) -> dict[str, int | float] | None:
         out["input"] = max(int(out["input"]) - nested, 0)
     if inclusive_output and "output" in out:
         out["output"] = max(int(out["output"]) - int(out.get("reasoning", 0)), 0)
+    # Drop zero-valued canonical dimensions, matching opentine's own compact
+    # serialization: a zeroed nested detail container would otherwise emit a
+    # bucket the provider never reported.
+    out = {k: v for k, v in out.items() if k not in TOKEN_DIMENSIONS or v}
     return out or None
 
 

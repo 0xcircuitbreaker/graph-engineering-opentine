@@ -34,7 +34,7 @@ from .models import (
     extract_json,
 )
 from .policy import GraphPolicy, GraphPolicyViolation
-from .recorder import DEFAULT_RUNS_DIR, GraphRecorder
+from .recorder import DEFAULT_RUNS_DIR, GraphRecorder, verify_fork_identity
 from .repo_backend import (
     RepoUnavailableError,
     candidates,
@@ -87,5 +87,6 @@ __all__ = [
     "repo_available",
     "repo_status",
     "save_to_repo",
+    "verify_fork_identity",
     "__version__",
 ]

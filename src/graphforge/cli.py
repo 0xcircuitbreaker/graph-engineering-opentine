@@ -13,7 +13,7 @@ from .engine import GraphEngine
 from .examples import fanout_graph, refinement_graph
 from .models import StaticModelAdapter, build_json_model_node
 from .policy import GraphPolicy
-from .recorder import DEFAULT_RUNS_DIR
+from .recorder import DEFAULT_RUNS_DIR, verify_fork_identity
 from .spec import END, GraphSpec
 
 try:
@@ -186,12 +186,29 @@ if _HAS_TYPER:
             )
         except (OSError, ValueError, AttributeError):
             signature_present = False
+        # The signature covers the run body plus an allowlist of metadata keys
+        # whose membership is version-dependent. Report the installed list
+        # rather than a count, and say plainly whether tags are in it — they
+        # are not, in any version shipped so far.
+        try:
+            from opentine.signing import _SIGNED_METADATA_KEYS as signed_keys
+        except ImportError:  # pragma: no cover - defensive
+            signed_keys = ()
         payload: dict[str, Any] = {
             "integrity_ok": integrity.ok,
             "digest": integrity.expected,
             "signature_present": signature_present,
             "signature_checked": False,
+            "signed_metadata_keys": sorted(str(k) for k in signed_keys),
+            "tags_covered_by_signature": "tags" in set(signed_keys),
         }
+        # A fork's id can prove the basis it was derived from (opentine 0.4.0+).
+        try:
+            fork_verdict = verify_fork_identity(Run.load(artifact))
+        except Exception:  # noqa: BLE001 - never let provenance reporting fail
+            fork_verdict = None
+        if fork_verdict is not None:
+            payload["fork_id_verified"] = fork_verdict
         if not integrity.ok:
             payload["integrity_reason"] = getattr(integrity, "reason", None)
 

@@ -4,76 +4,66 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.3.0 — 2026-07-31
+## 0.1.0 — first public release
 
-Supports `opentine>=0.2.0,<0.5`. CI exercises both ends of that range;
-features needing a newer opentine degrade rather than fail, and are selected
-by capability probe, never by version string.
+Supports `opentine>=0.2.0,<0.5`. CI exercises 0.2.0, 0.3.0 and 0.4.0 on
+Python 3.11 and 3.13. Features needing a newer opentine are selected by
+capability, never by version string, and degrade rather than fail.
 
-### Added
+(The project iterated through unpublished internal versions before this one.
+Nothing was released to PyPI until now, so this is 0.1.0 and the earlier
+numbering exists only in git history.)
 
-- **v3 repository backend** (`graphforge.repo_backend`) — store graph runs as
-  content-addressed objects with compare-and-swap refs, evaluation
-  attestations, release-gate promotion, search, and `fsck`, instead of one
-  `.tine` file per run. Fan-in lineage survives the round trip.
-- **Graph-layer diff** (`graphforge.graph_diff`) — compare two runs by node
-  path, first divergence, edges taken, visit counts and score drift. opentine's
-  own diffs cannot express this: a v3 event's identity includes a timestamp, so
-  two behaviourally identical runs share zero events.
-- **Signed-catalog pricing** (`graphforge.pricing`) — price a model call
-  against opentine's signed rate cards and record the catalog id, rate-card id
-  and an explicit complete/partial status, instead of an unattributed float.
-- **Provider usage normalization** — map provider-native token counts onto
-  opentine's mutually exclusive dimensions, correcting the inclusive counts
-  OpenAI, Anthropic, Google and Ollama each report differently.
-- **Artifact signing** — `GraphRecorder.save(sign_key=...)`, and a `verify`
-  command that reports integrity and signature separately.
-- **Per-act fork identity** (opentine 0.4.0) — forks defer to opentine, which
-  mints a unique id and records a verifiable basis. On older opentine,
-  graphforge supplies its own unique id, because the native id collides.
-- **Framework adapters** — LangGraph, Burr, CrewAI Flows, LlamaIndex
-  Workflows, pydantic-graph.
-- **Zero-glue ingestion** — OTLP/JSON GenAI exports, opentine `TraceEvent`
+### Graph engine
+
+- `GraphSpec` / `GraphEngine` — declared graphs with static edges, routers
+  (conditional edges as functions of state), join nodes with reducers, and
+  cycles bounded by a policy cycle guard.
+- `GraphEngine.resume` — fork a recorded artifact at any step, mutate state,
+  and continue the graph. The snapshot is verified against its recorded
+  digest first.
+- `GraphPolicy` — run-wide budgets (node executions, cost, wall clock, cycle
+  guard, success threshold), also declared as an opentine `Budget`.
+
+### Recording any framework
+
+- `GraphRunCapture` — a never-throw push API that records any external graph
+  framework. Recorder failures cannot break the host.
+- Shipped adapters: LangGraph (checkpointer wrapper + callback handler), Burr,
+  CrewAI Flows, LlamaIndex Workflows, pydantic-graph V2.
+- Zero-glue ingestion: raw OTLP/JSON GenAI exports, opentine `TraceEvent`
   streams, framework callback records, and JSON-lines event streams.
 
-### Fixed
+### Provenance
 
-- An unpaired UTF-16 surrogate anywhere in graph state made opentine refuse
-  the artifact and lose the entire recorded trace. Any JavaScript or Java
-  producer emits one for a truncated emoji.
-- Resume from a repository-loaded run silently failed for any state holding a
-  float with an integral value: RFC 8785 canonicalizes `21.0` to `21`, so the
-  recorded state digest stopped matching.
-- A join fed twice from the same node recorded duplicate parent ids, which a
-  v3 repository rejects permanently — the run saved as a file and could then
-  never be stored.
-- A chained join could fire with partial arrivals and execute twice.
-- Cost was pooled into one anonymous bucket; `cost_breakdown().by_model` now
-  attributes it. Provider-native usage names were passed through verbatim, so
-  a run recorded from an OpenAI-shaped payload reported zero tokens.
-- Router and join-reducer exceptions, non-finite scores, and un-deepcopyable
-  state each destroyed the whole trace; they now record an error step and save.
-- The MCP read path could read artifacts outside the runs directory, resolved
-  a run-id prefix by fully parsing every artifact, and emitted mermaid that an
-  ingested node id or edge label could break out of.
+- Every node execution records the **edge that fired it**, state digests
+  before and after, a key-level delta, a lossless state snapshot, and DAG
+  parent links — multi-parent at joins.
+- **v3 repositories** (opentine 0.3.0+): content-addressed storage with
+  compare-and-swap refs, evaluation attestations, release-gate promotion,
+  search and `fsck`. graphforge writes only `experiments/*`,
+  `heads/graphforge/*` and `tags/*`.
+- **Priced billing** — model calls priced against opentine's signed rate-card
+  catalog, carrying catalog id and an explicit complete/partial status. An
+  unpriceable call keeps the caller's own figure rather than being zeroed.
+- **Provider usage normalization** onto opentine's mutually exclusive
+  dimensions, verified case by case against opentine's own normalizers for
+  OpenAI (nested and flat Responses shapes), Anthropic (including the 5m/1h
+  cache split), Google and Ollama.
+- **Signing**, and a `verify` command that reports integrity and signature
+  separately, plus `fork_id_verified` and `tags_covered_by_signature` — tags
+  are outside the signature in every opentine shipped so far, which is why
+  every safety signal is also recorded as a step.
+- **Per-act fork identity** (opentine 0.4.0) via `verify_fork_identity`,
+  wrapping a check opentine still keeps private.
+- `graph_diff` — a graph-layer comparison (node path, first divergence, edges
+  taken, visit deltas, score drift) that opentine's step-level diffs cannot
+  express, because a v3 event's identity includes a timestamp.
 
-### Security
+### Surfaces
 
-- MCP refs are confined to the runs directory (traversal, absolute paths and
-  symlink escapes all rejected), artifacts are size-checked before loading,
-  and responses are capped.
-- A fork branch name supplied over MCP can no longer escape the runs
-  directory through the artifact filename.
-
-## 0.2.0 — 2026-07-30
-
-### Added
-
-- Universal framework adapters and zero-glue ingestion.
-
-## 0.1.0 — 2026-07-29
-
-### Added
-
-- Initial graph engineering toolkit: `GraphSpec`, `GraphEngine`,
-  `GraphRecorder`, `GraphRunCapture`, `GraphPolicy`, CLI and MCP server.
+- `graphforge` CLI and an MCP server. MCP refs are confined to the runs
+  directory, artifacts are size-checked before loading, responses are capped,
+  and mermaid identifiers are slugified. When a repository is available,
+  opentine's own repository tools are composed onto the same server, without
+  promotion.

@@ -1,0 +1,69 @@
+name: release
+
+# Publishing is driven by a version tag, so the artifact on PyPI always
+# corresponds to a commit you can check out. Pushing `v0.1.0` releases 0.1.0.
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+
+      # A tag that disagrees with pyproject would publish a version nobody can
+      # find in the history. Fail before anything is uploaded, because a PyPI
+      # version number cannot be reused even after deletion.
+      - name: Tag must match the packaged version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(uv run --no-project python -c "
+          import tomllib, pathlib
+          print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])
+          ")"
+          echo "tag=$tag packaged=$pkg"
+          [ "$tag" = "$pkg" ] || { echo "::error::tag $tag != pyproject version $pkg"; exit 1; }
+
+      - name: Test before publishing
+        run: |
+          uv sync --all-extras --dev
+          uv run pytest
+          uv run ruff check src tests
+
+      - name: Build
+        run: uv build
+
+      # Catches the failure mode that matters most: a source distribution that
+      # sweeps up whatever is sitting in the working tree.
+      - name: Refuse a distribution carrying local state
+        run: |
+          # Path segments must terminate, or `.git` also matches `.gitignore`,
+          # which is harmless and legitimately shipped. `.venv[^/]*` catches
+          # differently-suffixed scratch environments.
+          if tar -tzf dist/*.tar.gz | grep -E '(^|/)(\.venv[^/]*|\.claude|\.git)(/|$)|site-packages'; then
+            echo "::error::sdist contains local environment or editor state"; exit 1
+          fi
+          uv run --no-project --with twine twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write      # PyPI Trusted Publishing; no API token stored anywhere
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
