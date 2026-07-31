@@ -9,16 +9,53 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # Both ends of the supported range are exercised deliberately.
+        # Letting uv.lock decide meant CI tested only whichever opentine the
+        # lock happened to hold: every v3 repository, pricing and fork-identity
+        # test would skip, so a regression across that whole surface could
+        # merge green.
+        python-version: ["3.11", "3.13"]
+        opentine: ["0.2.0", "0.3.0"]
+    name: py${{ matrix.python-version }} / opentine ${{ matrix.opentine }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Sync dependencies
-        run: uv sync --all-extras --dev
+      - name: Install
+        run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
+      - name: Pin the opentine under test
+        run: uv pip install "opentine==${{ matrix.opentine }}"
+      # --no-sync on every later step: a plain `uv run` re-syncs from uv.lock
+      # and silently reinstalls the locked opentine, which would undo the pin
+      # above and make both matrix legs test the same version.
+      - name: Assert the pinned version is the one under test
+        run: |
+          uv run --no-sync python -c "
+          import sys, opentine
+          want = '${{ matrix.opentine }}'
+          got = opentine.__version__
+          print(sys.version)
+          print('opentine', got)
+          sys.exit(0 if got == want else f'expected opentine {want}, got {got}')
+          "
       - name: Run tests
-        run: uv run pytest
-      - name: Lint
-        run: uv run ruff check src tests
+        run: uv run --no-sync pytest
+      - name: Ruff
+        run: uv run --no-sync ruff check src tests
+
+  lock:
+    runs-on: ubuntu-latest
+    name: lockfile is current
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      # The built-in staleness check passes on a stale pin whenever the old
+      # version still satisfies the constraint, so it cannot notice a lock
+      # left behind by a dependency release. Re-resolving and diffing does.
+      - name: Fail if a fresh resolve would change the lock
+        run: |
+          cp uv.lock uv.lock.committed
+          uv lock --upgrade-package opentine
+          diff -u uv.lock.committed uv.lock \
+            || { echo "::error::uv.lock is stale - run 'uv lock --upgrade-package opentine' and commit it"; exit 1; }

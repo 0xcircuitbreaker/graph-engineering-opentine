@@ -9,6 +9,18 @@ description = "Graph engineering toolkit with opentine-native record/fork/replay
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
 keywords = [
   "opentine",
   "graph engineering",
@@ -20,6 +32,12 @@ keywords = [
   "mcp",
 ]
 dependencies = ["opentine>=0.2.0,<0.5"]
+
+[project.urls]
+Homepage = "https://github.com/0xcircuitbreaker/graph-engineering-opentine"
+Source = "https://github.com/0xcircuitbreaker/graph-engineering-opentine"
+Issues = "https://github.com/0xcircuitbreaker/graph-engineering-opentine/issues"
+Changelog = "https://github.com/0xcircuitbreaker/graph-engineering-opentine/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 cli = ["typer>=0.12"]
@@ -33,6 +51,19 @@ graphforge-mcp = "graphforge.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/graphforge"]
+
+# Enumerated rather than left to .gitignore: an untracked directory in the
+# working tree (a scratch virtualenv, local editor state) otherwise lands in
+# the sdist, and a published artifact cannot be unpublished.
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/graphforge",
+  "tests",
+  "README.md",
+  "CHANGELOG.md",
+  "LICENSE",
+  "pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q"

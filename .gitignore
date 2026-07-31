@@ -10,3 +10,4 @@ build/
 *.tine
 .coverage
 .claude/
+.venv*/
