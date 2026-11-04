@@ -207,6 +207,16 @@ def min_hmac_key_bytes() -> int:
     return int(MIN_HMAC_KEY_BYTES)
 
 
+def check_hmac_key(key: Any, algorithm: str) -> None:
+    """Refuse an HMAC key shorter than opentine's floor before anything is written."""
+    if not algorithm.startswith("hmac") or not isinstance(key, bytes | str):
+        return
+    size = len(key.encode("utf-8") if isinstance(key, str) else key)
+    floor = min_hmac_key_bytes()
+    if size < floor:
+        raise ValueError(f"HMAC signing key is {size} bytes; opentine requires at least {floor}")
+
+
 _KIND_MAP = {
     "model": StepKind.model,
     "tool": StepKind.tool,
@@ -656,13 +666,7 @@ class GraphRecorder:
         target = self._target(path)
         kwargs: dict[str, Any] = {}
         if sign_key is not None:
-            floor = min_hmac_key_bytes()
-            if sign_algorithm.startswith("hmac") and isinstance(sign_key, bytes | str):
-                size = len(sign_key.encode("utf-8") if isinstance(sign_key, str) else sign_key)
-                if size < floor:
-                    raise ValueError(
-                        f"HMAC signing key is {size} bytes; opentine requires at least {floor}"
-                    )
+            check_hmac_key(sign_key, sign_algorithm)
             kwargs["sign_key"] = sign_key
             kwargs["sign_algorithm"] = sign_algorithm
             if key_id is not None:
@@ -684,3 +688,58 @@ class GraphRecorder:
         pauser = getattr(self.run, "pause", None)
         self.path = pauser(target) if callable(pauser) else self.run.save(target)
         return self.path
+
+
+# ------------------------------------------------------------------ signing
+
+
+def load_ed25519_private_key(path: str | Path) -> Any:
+    """Load an Ed25519 private key file the way opentine writes them."""
+    from opentine.signing import ed25519_private_from_file
+
+    return ed25519_private_from_file(Path(path).expanduser())
+
+
+def load_ed25519_public_key(path: str | Path) -> Any:
+    """Load an Ed25519 public key file, in any encoding opentine accepts.
+
+    opentine's own key files are hex text; passing their raw bytes to
+    ``Run.verify_signature`` fails as "malformed", so go through opentine's
+    loader when it exists and only fall back to raw bytes on old builds.
+    """
+    source = Path(path).expanduser()
+    try:
+        from opentine.signing import ed25519_public_from_file
+    except ImportError:  # pragma: no cover - opentine without Ed25519 helpers
+        return source.read_bytes()
+    return ed25519_public_from_file(source)
+
+
+def sign_artifact_file(
+    source: str | Path,
+    *,
+    key: Any,
+    algorithm: str = "hmac-sha256",
+    signer: str | None = None,
+    key_id: str | None = None,
+    output: str | Path | None = None,
+) -> Path:
+    """Sign an existing finished artifact, in place or into ``output``.
+
+    The run is loaded and re-saved through opentine, so the signature is
+    always computed over exactly what opentine would verify. opentine
+    refuses to sign a run that is still running.
+    """
+    src = Path(source).expanduser()
+    target = Path(output).expanduser() if output else src
+    if target.is_dir():
+        raise ValueError(f"output {target} is a directory; pass a .tine file path")
+    check_hmac_key(key, algorithm)
+    run = Run.load(src)
+    kwargs: dict[str, Any] = {"sign_key": key, "sign_algorithm": algorithm}
+    if signer is not None:
+        kwargs["signer"] = clean_text(signer)
+    if key_id is not None:
+        kwargs["key_id"] = clean_text(key_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return run.save(target, **kwargs)

@@ -16,7 +16,10 @@ from .policy import GraphPolicy
 from .recorder import (
     DEFAULT_RUNS_DIR,
     artifact_signature_info,
+    load_ed25519_private_key,
+    load_ed25519_public_key,
     read_artifact_document,
+    sign_artifact_file,
     verify_fork_identity,
 )
 from .spec import END, GraphSpec
@@ -261,7 +264,10 @@ if _HAS_TYPER:
             material = public_key.read_bytes()
             if not material.strip():
                 raise typer.BadParameter(f"--public-key file {public_key} is empty")
-            key_material["public_key"] = material
+            try:
+                key_material["public_key"] = load_ed25519_public_key(public_key)
+            except Exception as exc:  # noqa: BLE001 - report, never traceback
+                raise typer.BadParameter(f"--public-key {public_key}: {exc}") from exc
         signature_ok = True
         if key_material:
             signature = Run.verify_signature(artifact, **key_material)
@@ -282,6 +288,69 @@ if _HAS_TYPER:
         _emit(payload, None)
         if not integrity.ok or not signature_ok:
             raise typer.Exit(code=1)
+
+    @app.command()
+    def sign(
+        artifact: Path = typer.Argument(..., exists=True, dir_okay=False),
+        hmac_key_env: str | None = typer.Option(
+            None, help="name of an environment variable holding an HMAC key (16+ bytes)"
+        ),
+        ed25519_key: Path | None = typer.Option(
+            None, exists=True, dir_okay=False, help="Ed25519 private key file"
+        ),
+        signer: str | None = typer.Option(None, help="label recorded as the signer"),
+        key_id: str | None = typer.Option(None, help="key identifier recorded with it"),
+        output: Path | None = typer.Option(
+            None, help="write the signed artifact here instead of in place"
+        ),
+    ) -> None:
+        """Sign a finished artifact with an HMAC key or an Ed25519 private key.
+
+        Keys are never taken on the command line, where they would show up
+        in the process list: HMAC keys come from an environment variable,
+        Ed25519 keys from a file.
+        """
+        import os
+
+        if (hmac_key_env is None) == (ed25519_key is None):
+            raise typer.BadParameter("pass exactly one of --hmac-key-env or --ed25519-key")
+        if hmac_key_env is not None:
+            secret = os.environ.get(hmac_key_env, "")
+            if not secret.strip():
+                raise typer.BadParameter(f"environment variable {hmac_key_env} is empty or unset")
+            key: Any = secret.encode("utf-8")
+            algorithm = "hmac-sha256"
+        else:
+            try:
+                key = load_ed25519_private_key(ed25519_key)
+            except Exception as exc:  # noqa: BLE001 - report, never traceback
+                raise typer.BadParameter(f"--ed25519-key {ed25519_key}: {exc}") from exc
+            algorithm = "ed25519"
+        try:
+            saved = sign_artifact_file(
+                artifact, key=key, algorithm=algorithm, signer=signer, key_id=key_id,
+                output=output,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface opentine's refusal cleanly
+            print(json.dumps({"signed": False, "error": str(exc)}, indent=2))
+            raise typer.Exit(code=1) from exc
+        _emit({"signed": True, "artifact": str(saved), "algorithm": algorithm}, None)
+
+    @app.command("export-otel")
+    def export_otel(
+        artifact: str = typer.Argument(..., help="run path, file name or run-id prefix"),
+        runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),
+        service_name: str = typer.Option("graphforge", help="OTel service.name"),
+        out: Path | None = typer.Option(None, help="write the OTLP/JSON document here"),
+    ) -> None:
+        """Export a recorded run as an OTLP/JSON GenAI trace document."""
+        try:
+            from opentine import to_otel_genai_document
+        except ImportError as exc:
+            raise typer.BadParameter("export-otel needs a newer opentine") from exc
+        path = mcp_mod._normalize_ref(artifact, Path(runs_dir).expanduser().resolve())
+        document = to_otel_genai_document(mcp_mod._load_run(path), service_name=service_name)
+        _emit(document, out)
 
     @app.command()
     def compare(
@@ -309,9 +378,9 @@ if _HAS_TYPER:
         runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),
     ) -> None:
         """Record a JSON file of OTel GenAI spans as a graph run."""
-        from .ingest import ingest_otel_spans
+        from .ingest import ingest_otel_spans, read_bounded_text
 
-        payload = json.loads(spans_file.read_text(encoding="utf-8"))
+        payload = json.loads(read_bounded_text(spans_file))
         spans = payload.get("spans", payload) if isinstance(payload, dict) else payload
         artifact = ingest_otel_spans(goal, spans, runs_dir=runs_dir)
         _emit({"artifact": str(artifact)}, None)
