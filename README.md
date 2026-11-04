@@ -44,6 +44,9 @@ graphforge run-demo-fanout --question "graphs vs loops"
 # model-backed node off a static adapter (offline, fence-safe JSON parsing)
 graphforge run-model-json-demo "draft a status update"
 
+# export a run as an OTLP/JSON GenAI trace (Jaeger, Tempo, any OTLP backend)
+graphforge export-otel <run-id-prefix> --out trace.json
+
 # inspect artifacts
 graphforge list
 graphforge show <run-id-prefix>
@@ -282,9 +285,13 @@ recorder.save(sign_key=key, signer="ci", key_id="k1")   # tamper evidence
 ```
 
 ```bash
+graphforge sign run.tine --hmac-key-env GRAPHFORGE_KEY --signer ci   # sign any finished run
+graphforge sign run.tine --ed25519-key signer.pem --output signed.tine
 graphforge verify run.tine --hmac-key-env GRAPHFORGE_KEY   # integrity AND signature
 graphforge verify run.tine --public-key signer.pub           # Ed25519
 ```
+
+`sign` works on any finished artifact: demo runs, ingested runs and forks. It never takes a key as a command-line argument. HMAC keys come from an environment variable and Ed25519 keys from a file, in the format opentine's own key generator writes.
 
 Prefer `--hmac-key-env` over `--hmac-key`, because a key given on the command line shows up in the process list. An empty or unset key fails closed and never quietly drops back to a checksum check. Current opentine refuses HMAC keys shorter than 16 bytes and will not sign a run that is still running; `GraphRecorder.save` checks the key length up front and raises a clear error.
 
@@ -315,6 +322,10 @@ GraphPolicy(
 ```
 
 All budgets are **run-wide** and every enforcement records an honest, tagged `gate:<reason>` step in the artifact — a budget kill is never disguised as success.
+
+## Model adapters and ingestion limits
+
+`OpenAICompatAdapter` sends your API key only to `https://` endpoints, or to plain `http://` on `localhost`, `127.0.0.1` or `::1` for local model servers. Any other URL is refused before a request is made. Model responses larger than 16 MiB are refused rather than parsed. `ingest-otel` and `ingest-jsonl` read regular files of up to 256 MiB.
 
 ## MCP integration
 

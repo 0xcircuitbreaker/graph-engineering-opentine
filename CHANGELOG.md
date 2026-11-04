@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Supports `opentine>=0.2.0,<0.35`. CI adds 0.26.0 and 0.34.0 to the matrix.
 
+### Added
+
+- `graphforge sign` signs any finished artifact with an HMAC key (taken from
+  an environment variable) or an Ed25519 private key file, in place or into
+  `--output`.
+- `graphforge export-otel` writes a recorded run as an OTLP/JSON GenAI trace,
+  using opentine's exporter.
+- `graphforge list` and `graphforge --version`, which prints both the
+  graphforge and opentine versions.
+- `GRAPHFORGE_RUNS_DIR` overrides the default runs directory.
+- `write_artifact_document` and `artifact_signature_info` helpers.
+
 ### Changed
 
 - Artifacts are read through opentine's bounded reader
@@ -21,11 +33,19 @@ Supports `opentine>=0.2.0,<0.35`. CI adds 0.26.0 and 0.34.0 to the matrix.
 
 ### Fixed
 
+- `verify --public-key` rejected the Ed25519 public key files opentine
+  generates as "malformed". Key files are now loaded through opentine.
 - `verify` reported `signature_present: false` for every signed artifact
   written by opentine 0.11 or later.
 
 ### Security
 
+- `OpenAICompatAdapter` refuses endpoints that are not `https://` (or plain
+  `http://` to loopback). It previously sent the bearer token to any URL,
+  including `file://` and plain-HTTP remote hosts. Responses over 16 MiB are
+  refused.
+- File-based ingestion refuses inputs that are not regular files or are
+  larger than 256 MiB, instead of reading them whole into memory.
 - `graphforge-mcp --read-only` removes every write tool. opentine's
   repository tools go through its reviewed allowlist, and are left out
   entirely when that allowlist is missing.
@@ -33,13 +53,6 @@ Supports `opentine>=0.2.0,<0.35`. CI adds 0.26.0 and 0.34.0 to the matrix.
   An unset variable fails closed.
 - `GraphRecorder.save` refuses an HMAC key below opentine's 16-byte minimum
   before it writes anything.
-
-### Added
-
-- `graphforge list` and `graphforge --version`, which prints both the
-  graphforge and opentine versions.
-- `GRAPHFORGE_RUNS_DIR` overrides the default runs directory.
-- `write_artifact_document` and `artifact_signature_info` helpers.
 
 ## 0.1.0 — first public release
 
