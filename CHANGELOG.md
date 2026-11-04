@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+Supports `opentine>=0.2.0,<0.35`. CI adds 0.26.0 and 0.34.0 to the matrix.
+
+### Changed
+
+- Artifacts are read through opentine's bounded reader
+  (`graphforge.recorder.read_artifact_document`). Compressed (0.11+) and
+  v4-format (0.26+) artifacts load everywhere graphforge reads them.
+- `graphforge verify` reads signature facts from the artifact instead of the
+  installed opentine. It reports `format_version` and `signature_schemes`,
+  and `tags_covered_by_signature` is now true for `tine-sig/2` and `/3`.
+  It drops `signed_metadata_keys`, which relied on a private constant that
+  opentine removed.
+
+### Fixed
+
+- `verify` reported `signature_present: false` for every signed artifact
+  written by opentine 0.11 or later.
+
+### Security
+
+- `graphforge-mcp --read-only` removes every write tool. opentine's
+  repository tools go through its reviewed allowlist, and are left out
+  entirely when that allowlist is missing.
+- `verify --hmac-key-env NAME` keeps the key out of the process list.
+  An unset variable fails closed.
+- `GraphRecorder.save` refuses an HMAC key below opentine's 16-byte minimum
+  before it writes anything.
+
+### Added
+
+- `graphforge list` and `graphforge --version`, which prints both the
+  graphforge and opentine versions.
+- `GRAPHFORGE_RUNS_DIR` overrides the default runs directory.
+- `write_artifact_document` and `artifact_signature_info` helpers.
+
 ## 0.1.0 — first public release
 
 Supports `opentine>=0.2.0,<0.5`. CI exercises 0.2.0, 0.3.0 and 0.4.0 on
