@@ -1,6 +1,5 @@
 """Regression tests for the confirmed findings of the adversarial review."""
 
-import json
 
 import pytest
 from opentine import Run, RunStatus, StepKind
@@ -268,27 +267,17 @@ def test_resume_rejects_redacted_snapshot(tmp_path):
     node_step = next(
         sid for sid in run.graph.order if run.graph.steps[sid].inputs.get("node") == "evaluate"
     )
-    # Simulate opentine's save-time redaction on the artifact.
-    payload = json.loads(original.artifact.read_text())
-
+    # Simulate save-time redaction on the artifact. Done on the loaded Run,
+    # not the raw JSON: the v4 format stores step bodies as encoded blobs.
     replaced = []
-
-    def redact(value):
-        if isinstance(value, dict):
-            for key, inner in value.items():
-                if key == "state_after" and isinstance(inner, dict) and "session_key" in inner:
-                    inner["session_key"] = "[REDACTED]"
-                    replaced.append(True)
-                else:
-                    redact(inner)
-        elif isinstance(value, list):
-            for item in value:
-                redact(item)
-
-    redact(payload)
+    for step in run.graph.steps.values():
+        snapshot = (step.outputs or {}).get("state_after")
+        if isinstance(snapshot, dict) and "session_key" in snapshot:
+            snapshot["session_key"] = "[REDACTED]"
+            replaced.append(True)
     assert replaced, "test setup: no state_after with session_key found"
     tampered = tmp_path / "tampered.tine"
-    tampered.write_text(json.dumps(payload))
+    run.save(tampered)
 
     with pytest.raises(GraphExecutionError, match="redact"):
         engine.resume(tampered, node_step)

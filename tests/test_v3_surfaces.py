@@ -4,7 +4,6 @@ The attribution/signing/budget tests run on both opentine 0.2.0 and 0.3.0;
 the billing ones need 0.3.0's pricing catalog.
 """
 
-import json
 
 import pytest
 from opentine import Run
@@ -19,6 +18,7 @@ from graphforge import (
 )
 from graphforge.examples import fanout_graph, refinement_graph
 from graphforge.pricing import billing_available, to_usage
+from graphforge.recorder import read_artifact_document, write_artifact_document
 
 HMAC_KEY = b"a-test-key-at-least-16-bytes-long"
 
@@ -148,10 +148,14 @@ def test_signed_artifact_verifies_and_detects_tampering(tmp_path):
     assert good.ok and good.state == "verified"
     assert good.signer == "ci"
 
-    payload = json.loads(path.read_text())
-    payload["user_prompt"] = "rewritten"
+    payload = read_artifact_document(path)
+    if "objects" in payload:  # v4: rewrite one content object's bytes
+        blob = next(o for o in payload["objects"].values() if o.get("type") == "blob")
+        blob["data"] = "eyJyZXdyaXR0ZW4iOnRydWV9"
+    else:
+        payload["user_prompt"] = "rewritten"
     tampered = tmp_path / "tampered.tine"
-    tampered.write_text(json.dumps(payload))
+    write_artifact_document(tampered, payload)
     assert not Run.verify_signature(tampered, hmac_key=HMAC_KEY).ok
 
 

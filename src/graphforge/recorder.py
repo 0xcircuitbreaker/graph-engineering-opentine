@@ -2,8 +2,9 @@
 
 Every module that WRITES opentine runs goes through this file (the CLI and
 MCP server only read), so an opentine version bump touches one place. The
-recorder maps graph execution onto the portable v2 ``.tine`` surface that is
-identical across opentine 0.2.x and 0.3.x:
+recorder maps graph execution onto the portable ``Run`` surface that every
+supported opentine exposes (0.2.x through the v4-format 0.2x/0.3x releases;
+opentine chooses the on-disk format, graphforge never depends on it):
 
 - one node execution  -> one step (kind mapped from the node kind), with the
   edge taken recorded first-class on the destination step,
@@ -18,6 +19,7 @@ bools) where 0.2.0 accepted anything.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -37,7 +39,11 @@ from .state import (
     to_jsonable,
 )
 
-DEFAULT_RUNS_DIR = Path("~/.local/share/graphforge").expanduser()
+#: Where artifacts land by default. ``GRAPHFORGE_RUNS_DIR`` overrides it, so a
+#: CI job or a project can keep runs out of the shared user directory.
+DEFAULT_RUNS_DIR = Path(
+    os.environ.get("GRAPHFORGE_RUNS_DIR") or "~/.local/share/graphforge"
+).expanduser()
 
 
 def _fork_mints_unique_ids() -> bool:
@@ -103,6 +109,102 @@ def fork_run(
     # slug(): the id becomes a file name and branch is caller/MCP-supplied.
     unique = f"{parent_run.run_id[:12]}-{slug(branch)}-{uuid4().hex[:8]}"
     return parent_run.fork(from_step_id=from_step_id, new_run_id=unique, branch=branch)
+
+
+#: Signature schemes whose signed view covers the run's tags. ``tine-sig/1``
+#: (opentine 0.3.0-0.7.0) signed a frozen metadata allowlist without tags;
+#: ``tine-sig/2`` (0.7.1+) signs every metadata key but the integrity block,
+#: and ``tine-sig/3`` (the v4 format, default since 0.26) binds the tag
+#: annotation chain.
+TAG_COVERING_SCHEMES = frozenset({"tine-sig/2", "tine-sig/3"})
+
+#: Hard ceiling for the fallback reader on opentine builds that predate the
+#: bounded ``_artifact_io`` reader. Mirrors opentine's own 256 MiB limit.
+_MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
+
+
+def read_artifact_document(path: str | Path) -> Any:
+    """Parse a ``.tine`` file into its raw JSON document, whatever its form.
+
+    opentine 0.11+ writes compressed artifacts and 0.26+ writes the v4
+    object format by default, so ``json.loads(path.read_text())`` no longer
+    works. This defers to opentine's bounded reader (size cap, inflate cap,
+    duplicate-key and non-finite-number refusal) and only falls back to a
+    size-capped plain JSON read on builds too old to have it.
+    """
+    try:
+        from opentine._artifact_io import read_artifact_json
+    except ImportError:  # pragma: no cover - opentine < 0.11
+        import json
+
+        source = Path(path)
+        if source.stat().st_size > _MAX_ARTIFACT_BYTES:
+            raise ValueError(".tine artifact exceeds the 256 MiB size limit") from None
+        return json.loads(source.read_text(encoding="utf-8"))
+    return read_artifact_json(path)
+
+
+def write_artifact_document(path: str | Path, document: Any) -> Path:
+    """Write a raw artifact document back as plain JSON (every reader accepts it).
+
+    Intended for tooling and tests that edit an artifact by hand; normal
+    recording always goes through :meth:`GraphRecorder.save`.
+    """
+    import json
+
+    target = Path(path)
+    target.write_text(json.dumps(document), encoding="utf-8")
+    return target
+
+
+def artifact_signature_info(document: Any) -> dict[str, Any]:
+    """Describe the signature(s) an artifact document carries.
+
+    Handles the legacy v2 layout (``metadata.integrity.signature``) and the
+    v4 layout (top-level ``signatures`` list). Never raises: a malformed
+    document simply reports no signature.
+    """
+    info: dict[str, Any] = {
+        "format_version": None,
+        "signature_present": False,
+        "signature_schemes": [],
+        "tags_covered_by_signature": False,
+    }
+    if not isinstance(document, dict):
+        return info
+    version = document.get("format_version")
+    info["format_version"] = version if type(version) is int else None
+    blocks: list[Any] = []
+    signatures = document.get("signatures")
+    if isinstance(signatures, list):
+        blocks.extend(signatures)
+    metadata = document.get("metadata")
+    if isinstance(metadata, dict):
+        integrity = metadata.get("integrity")
+        if isinstance(integrity, dict) and integrity.get("signature"):
+            blocks.append(integrity["signature"])
+    schemes = sorted(
+        {
+            str(block.get("scheme") or "tine-sig/1")
+            for block in blocks
+            if isinstance(block, dict)
+        }
+    )
+    info["signature_present"] = bool(schemes)
+    info["signature_schemes"] = schemes
+    info["tags_covered_by_signature"] = bool(schemes) and all(
+        scheme in TAG_COVERING_SCHEMES for scheme in schemes
+    )
+    return info
+
+
+def min_hmac_key_bytes() -> int:
+    """The shortest HMAC key the installed opentine accepts (0 = no floor)."""
+    try:
+        from opentine.signing import MIN_HMAC_KEY_BYTES
+    except ImportError:  # pragma: no cover - older opentine had no floor
+        return 0
+    return int(MIN_HMAC_KEY_BYTES)
 
 
 _KIND_MAP = {
@@ -554,6 +656,13 @@ class GraphRecorder:
         target = self._target(path)
         kwargs: dict[str, Any] = {}
         if sign_key is not None:
+            floor = min_hmac_key_bytes()
+            if sign_algorithm.startswith("hmac") and isinstance(sign_key, bytes | str):
+                size = len(sign_key.encode("utf-8") if isinstance(sign_key, str) else sign_key)
+                if size < floor:
+                    raise ValueError(
+                        f"HMAC signing key is {size} bytes; opentine requires at least {floor}"
+                    )
             kwargs["sign_key"] = sign_key
             kwargs["sign_algorithm"] = sign_algorithm
             if key_id is not None:

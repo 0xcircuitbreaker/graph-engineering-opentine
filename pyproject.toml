@@ -31,7 +31,7 @@ keywords = [
   "langgraph",
   "mcp",
 ]
-dependencies = ["opentine>=0.2.0,<0.5"]
+dependencies = ["opentine>=0.2.0,<0.35"]
 
 [project.urls]
 Homepage = "https://github.com/0xcircuitbreaker/graph-engineering-opentine"
