@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -73,6 +74,30 @@ class StaticModelAdapter:
         self._cursor = 0
 
 
+#: Ceiling on a single model response body. Far above any real completion,
+#: low enough that a misbehaving endpoint cannot exhaust memory.
+_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _check_endpoint(endpoint: str) -> None:
+    """Only send the API key over HTTPS, or plain HTTP to this machine.
+
+    ``urllib`` also opens ``file://`` and ``ftp://`` URLs, and a plain-HTTP
+    remote endpoint would put the bearer token on the wire unencrypted.
+    """
+    parsed = urllib.parse.urlsplit(str(endpoint))
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if scheme == "https" and host:
+        return
+    if scheme == "http" and host in _LOOPBACK_HOSTS:
+        return
+    raise ValueError(
+        f"refusing model endpoint {endpoint!r}: use https://, or http:// only for "
+        "localhost, 127.0.0.1 or ::1"
+    )
+
 @dataclass
 class OpenAICompatAdapter:
     """Chat-completions adapter for any OpenAI-protocol endpoint.
@@ -91,6 +116,7 @@ class OpenAICompatAdapter:
     cost_per_million_output: float | None = None
 
     def complete(self, prompt: str) -> GraphModelOutput:
+        _check_endpoint(self.endpoint)
         key = self.api_key or os.environ.get("OPENAI_API_KEY")
         if not key:
             raise RuntimeError(
@@ -114,7 +140,12 @@ class OpenAICompatAdapter:
         )
         started = time.monotonic()
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            body = json.loads(response.read().decode("utf-8"))
+            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        if len(raw) > _MAX_RESPONSE_BYTES:
+            raise RuntimeError(
+                f"model response exceeds {_MAX_RESPONSE_BYTES} bytes; refusing to parse it"
+            )
+        body = json.loads(raw.decode("utf-8"))
         duration = time.monotonic() - started
         choices = body.get("choices") or []
         first = choices[0] if choices and isinstance(choices[0], dict) else {}

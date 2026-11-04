@@ -1073,7 +1073,7 @@ def ingest_jsonl(
     a final ``end`` event is implied if the stream lacks one.
     """
     if isinstance(source, str | Path):
-        lines: Iterable[str] = Path(source).expanduser().read_text().splitlines()
+        lines: Iterable[str] = read_bounded_text(source).splitlines()
     else:
         lines = source
     capture = GraphRunCapture(goal, framework=framework, runs_dir=runs_dir, policy=policy)
@@ -1161,3 +1161,23 @@ def ingest_jsonl(
     if not ended:
         return capture.end(summary="jsonl stream ended without end event")
     return None  # pragma: no cover - unreachable
+
+
+#: Largest input file the file-based ingest entry points will read.
+MAX_INGEST_BYTES = 256 * 1024 * 1024
+
+
+def read_bounded_text(source: str | Path, *, limit: int = MAX_INGEST_BYTES) -> str:
+    """Read a regular UTF-8 file, refusing anything larger than ``limit``.
+
+    The check is on bytes actually read, not just ``stat``, so a FIFO or a
+    file that grows while being read cannot get past it.
+    """
+    path = Path(source).expanduser()
+    if not path.is_file():
+        raise ValueError(f"{path} is not a regular file")
+    with path.open("rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{path} exceeds the {limit}-byte ingest limit")
+    return data.decode("utf-8")
