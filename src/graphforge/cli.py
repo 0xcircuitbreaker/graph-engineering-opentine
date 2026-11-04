@@ -13,7 +13,12 @@ from .engine import GraphEngine
 from .examples import fanout_graph, refinement_graph
 from .models import StaticModelAdapter, build_json_model_node
 from .policy import GraphPolicy
-from .recorder import DEFAULT_RUNS_DIR, verify_fork_identity
+from .recorder import (
+    DEFAULT_RUNS_DIR,
+    artifact_signature_info,
+    read_artifact_document,
+    verify_fork_identity,
+)
 from .spec import END, GraphSpec
 
 try:
@@ -141,6 +146,33 @@ if _HAS_TYPER:
         result = engine.run(goal=goal, initial_state={})
         _emit(_summary(result), out)
 
+    def _version_callback(value: bool) -> None:
+        if value:
+            import opentine
+
+            from ._version import __version__
+
+            print(f"graphforge {__version__} (opentine {opentine.__version__})")
+            raise typer.Exit()
+
+    @app.callback()
+    def _main(
+        version: bool = typer.Option(
+            False, "--version", callback=_version_callback, is_eager=True,
+            help="print graphforge and opentine versions",
+        ),
+    ) -> None:
+        """Graph engineering with opentine provenance."""
+
+    @app.command("list")
+    def list_cmd(
+        runs_dir: str = typer.Option(str(DEFAULT_RUNS_DIR)),
+        limit: int = typer.Option(20, help="newest runs to show"),
+    ) -> None:
+        """List recorded graph runs, newest first."""
+        runs = mcp_mod.list_runs(runs_dir)[: max(1, limit)]
+        print(json.dumps(runs, indent=2, default=repr))
+
     @app.command()
     def show(
         artifact: str = typer.Argument(..., help="path, file name, or run-id prefix"),
@@ -162,7 +194,12 @@ if _HAS_TYPER:
     def verify(
         artifact: Path = typer.Argument(..., exists=True, dir_okay=False),
         hmac_key: str | None = typer.Option(
-            None, help="HMAC key to check the signature against"
+            None,
+            help="HMAC key to check the signature against (visible in the process "
+            "list; prefer --hmac-key-env)",
+        ),
+        hmac_key_env: str | None = typer.Option(
+            None, help="name of an environment variable holding the HMAC key"
         ),
         public_key: Path | None = typer.Option(
             None, help="Ed25519 public key file to check the signature against"
@@ -171,36 +208,29 @@ if _HAS_TYPER:
         """Check artifact integrity and, when a key is given, its signature.
 
         Integrity is a checksum: it proves the file was not corrupted, NOT
-        that nobody rewrote it. Only a signature is tamper evidence, and even
-        then tags sit outside what the signature covers.
+        that nobody rewrote it. Only a signature is tamper evidence.
         """
+        import os
+
         integrity = Run.verify_integrity(artifact)
         # Report whether a signature EXISTS separately from whether it was
         # checked, so "signed but unverified" is greppable and never reads
-        # the same as "not signed".
-        signature_present = False
+        # the same as "not signed". Read through opentine's own bounded
+        # reader: artifacts are compressed (0.11+) and v4-format (0.26+).
         try:
-            body = json.loads(artifact.read_text(encoding="utf-8"))
-            signature_present = bool(
-                (body.get("metadata") or {}).get("integrity", {}).get("signature")
-            )
-        except (OSError, ValueError, AttributeError):
-            signature_present = False
-        # The signature covers the run body plus an allowlist of metadata keys
-        # whose membership is version-dependent. Report the installed list
-        # rather than a count, and say plainly whether tags are in it — they
-        # are not, in any version shipped so far.
-        try:
-            from opentine.signing import _SIGNED_METADATA_KEYS as signed_keys
-        except ImportError:  # pragma: no cover - defensive
-            signed_keys = ()
+            sig_info = artifact_signature_info(read_artifact_document(artifact))
+        except (OSError, ValueError):
+            sig_info = artifact_signature_info(None)
         payload: dict[str, Any] = {
             "integrity_ok": integrity.ok,
             "digest": integrity.expected,
-            "signature_present": signature_present,
+            "format_version": sig_info["format_version"],
+            "signature_present": sig_info["signature_present"],
+            "signature_schemes": sig_info["signature_schemes"],
             "signature_checked": False,
-            "signed_metadata_keys": sorted(str(k) for k in signed_keys),
-            "tags_covered_by_signature": "tags" in set(signed_keys),
+            # Read from the artifact's own signature scheme, not the installed
+            # opentine: tine-sig/1 never covered tags, tine-sig/2 and /3 do.
+            "tags_covered_by_signature": sig_info["tags_covered_by_signature"],
         }
         # A fork's id can prove the basis it was derived from (opentine 0.4.0+).
         try:
@@ -212,6 +242,10 @@ if _HAS_TYPER:
         if not integrity.ok:
             payload["integrity_reason"] = getattr(integrity, "reason", None)
 
+        if hmac_key is not None and hmac_key_env is not None:
+            raise typer.BadParameter("pass --hmac-key or --hmac-key-env, not both")
+        if hmac_key_env is not None:
+            hmac_key = os.environ.get(hmac_key_env, "")
         key_material: dict[str, Any] = {}
         # Fail closed on an empty key: an unset environment variable is the
         # normal way CI produces one, and treating it as "no key given" would
@@ -219,7 +253,7 @@ if _HAS_TYPER:
         if hmac_key is not None:
             if not hmac_key.strip():
                 raise typer.BadParameter(
-                    "--hmac-key was empty (unset environment variable?); "
+                    "the HMAC key was empty (unset environment variable?); "
                     "pass a real key or omit the flag"
                 )
             key_material["hmac_key"] = hmac_key.encode("utf-8")

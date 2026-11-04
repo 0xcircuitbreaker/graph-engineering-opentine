@@ -588,21 +588,21 @@ wheels = [
 
 [[package]]
 name = "opentine"
-version = "0.4.0"
+version = "0.34.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/da/da/d34489a26dadfc3ce72828ec148f6f2d13d880951184b3107aa690e304dc/opentine-0.4.0.tar.gz", hash = "sha256:23ecd40518c9a773a1c43676ff8e9a2a57e7cf23cdb26225b78d797a8b253220", size = 632757, upload-time = "2026-07-31T16:33:50.277Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/df/cc31563bbcc43b830622ae5d03c14f82924122a8eba7e0ecce20c03188b0/opentine-0.34.0.tar.gz", hash = "sha256:727eddb911d89a62fc94d8bbb3b2100978ded5962bb43a8125dfff9ab1e2dfad", size = 2747039, upload-time = "2026-11-03T12:45:52.61Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a8/8e/a4f01d612c46eb56da5b7009ce47b38f782da463d2aeab774dd62b4a2c8a/opentine-0.4.0-py3-none-any.whl", hash = "sha256:d788e6cb19bb3be0f48100d8a8bee25afc39d77852a5fc925d985a5b82a41c93", size = 338544, upload-time = "2026-07-31T16:33:48.787Z" },
+    { url = "https://files.pythonhosted.org/packages/69/35/f499c9d3263d8122192d04e20f0cbb61a2510263fd9eb4d308d4e600ce0e/opentine-0.34.0-py3-none-any.whl", hash = "sha256:6474f3d0f41da0af6a8c1f1fa16569dcd8a70fe6e38316caa59eb9ebfd146de6", size = 1200461, upload-time = "2026-11-03T12:45:50.717Z" },
 ]
 
 [[package]]
 name = "opentine-graph-engineering"
-version = "0.3.1"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "opentine" },
@@ -630,7 +630,7 @@ requires-dist = [
     { name = "langgraph-checkpoint", marker = "extra == 'langgraph'", specifier = ">=2.0" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0" },
-    { name = "opentine", specifier = ">=0.2.0,<0.5" },
+    { name = "opentine", specifier = ">=0.2.0,<0.35" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12" },

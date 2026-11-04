@@ -11,13 +11,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Both ends of the supported range are exercised deliberately.
+        # Both ends of the supported range are exercised deliberately, plus
+        # 0.26.0, the first release that writes v4 artifacts by default.
         # Letting uv.lock decide meant CI tested only whichever opentine the
         # lock happened to hold: every v3 repository, pricing and fork-identity
         # test would skip, so a regression across that whole surface could
         # merge green.
         python-version: ["3.11", "3.13"]
-        opentine: ["0.2.0", "0.3.0", "0.4.0"]
+        opentine: ["0.2.0", "0.3.0", "0.4.0", "0.26.0", "0.34.0"]
     name: py${{ matrix.python-version }} / opentine ${{ matrix.opentine }}
     steps:
       - uses: actions/checkout@v4
