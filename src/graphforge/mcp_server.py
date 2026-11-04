@@ -556,7 +556,9 @@ def _register_repo_tools(server: Any, repo_path: str) -> bool:
     return True
 
 
-def _register_opentine_repository_tools(server: Any, repo_path: str) -> bool:
+def _register_opentine_repository_tools(
+    server: Any, repo_path: str, *, read_only: bool = False
+) -> bool:
     """Compose opentine's own v3 repository tools onto our server.
 
     Reimplementing search/inspect/context_slice/semantic_diff/fork/resume/
@@ -575,7 +577,20 @@ def _register_opentine_repository_tools(server: Any, repo_path: str) -> bool:
         # allow_promotion stays False, always: a promotion ref is a release
         # gate, and run content a model reads here is untrusted input, so
         # "promote this run" is a one-step prompt-injection payload.
-        register_repository_tools(server, str(repo_path), allow_promotion=False)
+        target = server
+        if read_only:
+            # Fail closed: without opentine's reviewed allowlist proxy
+            # (0.2x+) we cannot tell its read tools from its write tools.
+            try:
+                from opentine._mcp_readonly import ReadOnlyTools
+            except ImportError:
+                _LOG.warning(
+                    "read-only mode needs opentine's read-only tool allowlist; "
+                    "opentine repository tools not registered"
+                )
+                return False
+            target = ReadOnlyTools(server)
+        register_repository_tools(target, str(repo_path), allow_promotion=False)
     except FileNotFoundError as exc:
         # opentine's own create_server swallows this silently; an operator who
         # passed --repo deserves to know why the v3 tools are missing.
@@ -588,8 +603,17 @@ def _register_opentine_repository_tools(server: Any, repo_path: str) -> bool:
     return True
 
 
-def build_server(runs_dir: str = str(DEFAULT_RUNS_DIR), repo_path: str | None = None) -> Any:
+def build_server(
+    runs_dir: str = str(DEFAULT_RUNS_DIR),
+    repo_path: str | None = None,
+    *,
+    read_only: bool = False,
+) -> Any:
     """Register the plain functions as MCP tools (mcp 1.x and 2.x).
+
+    ``read_only`` drops every tool that writes (``fork_graph_run`` and
+    opentine's fork/resume/evaluate/attest repository tools), for a model
+    that reads untrusted run content.
 
     ``repo_path`` additionally exposes the v3 repository: graphforge's own
     status/candidate tools plus opentine's repository tool set, composed
@@ -624,14 +648,18 @@ def build_server(runs_dir: str = str(DEFAULT_RUNS_DIR), repo_path: str | None = 
         """Diff two runs at the graph layer: path, divergence, edges, visits, scores."""
         return graph_diff_runs(left, right, runs_dir)
 
-    @server.tool()
-    def fork_graph_run(run: str, from_step: str, branch: str = "mcp-fork") -> dict[str, Any]:
-        """Fork a run at a step into a new artifact."""
-        return fork_run(run, from_step, branch, runs_dir)
+    if not read_only:
+
+        @server.tool()
+        def fork_graph_run(
+            run: str, from_step: str, branch: str = "mcp-fork"
+        ) -> dict[str, Any]:
+            """Fork a run at a step into a new artifact."""
+            return fork_run(run, from_step, branch, runs_dir)
 
     if repo_path is not None:
         _register_repo_tools(server, repo_path)
-        _register_opentine_repository_tools(server, repo_path)
+        _register_opentine_repository_tools(server, repo_path, read_only=read_only)
     return server
 
 
@@ -643,8 +671,13 @@ def main() -> None:
         default=None,
         help="also expose opentine's v3 repository tools from this repository path",
     )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="expose only tools that read: no forks, resumes, attestations or evaluations",
+    )
     args = parser.parse_args()
-    server = build_server(runs_dir=args.runs_dir, repo_path=args.repo)
+    server = build_server(runs_dir=args.runs_dir, repo_path=args.repo, read_only=args.read_only)
     server.run(transport="stdio")
 
 
