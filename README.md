@@ -28,7 +28,9 @@ cd graph-engineering-opentine
 pip install -e ".[cli,mcp]"
 ```
 
-Requires Python >= 3.11 and `opentine>=0.2.0,<0.5`. The full suite runs against opentine 0.2.0, 0.3.0 and 0.4.0, and CI exercises all three. Newer-only features (v3 repositories, priced billing, per-act fork identity) degrade cleanly and their tests skip on older versions.
+Requires Python >= 3.11 and `opentine>=0.2.0,<0.35`. CI runs the full suite against opentine 0.2.0, 0.3.0, 0.4.0, 0.26.0 (the first release that writes the v4 artifact format by default) and 0.34.0. Features that need a newer opentine (v3 repositories, priced billing, per-act fork identity, the read-only MCP allowlist) switch off cleanly on older versions, and their tests skip there.
+
+Artifacts are written in whatever format the installed opentine chooses (compressed since 0.11, v4 since 0.26). Every graphforge reader goes through `graphforge.recorder.read_artifact_document`, which uses opentine's own bounded reader, so nothing depends on the on-disk layout. Set `GRAPHFORGE_RUNS_DIR` to change where runs are saved (default `~/.local/share/graphforge`).
 
 ## Quick start
 
@@ -43,6 +45,7 @@ graphforge run-demo-fanout --question "graphs vs loops"
 graphforge run-model-json-demo "draft a status update"
 
 # inspect artifacts
+graphforge list
 graphforge show <run-id-prefix>
 graphforge mermaid <run-id-prefix>       # edges the run actually took
 graphforge verify ~/.local/share/graphforge/<run-id>.tine
@@ -279,10 +282,13 @@ recorder.save(sign_key=key, signer="ci", key_id="k1")   # tamper evidence
 ```
 
 ```bash
-graphforge verify run.tine --hmac-key "$KEY"    # integrity AND signature
+graphforge verify run.tine --hmac-key-env GRAPHFORGE_KEY   # integrity AND signature
+graphforge verify run.tine --public-key signer.pub           # Ed25519
 ```
 
-Integrity is a checksum — it proves the file was not corrupted, not that nobody rewrote it. Only a signature is tamper evidence, and even a signature covers the run body plus an allowlist of metadata keys whose membership depends on the opentine version (it grew in 0.4.0). Run **tags are outside it in every version**. That is why every graphforge safety signal (`gate:*`, topology drift, unresolved joins) is recorded as a *step* as well as a tag — the step body is inside the digest and the signature.
+Prefer `--hmac-key-env` over `--hmac-key`, because a key given on the command line shows up in the process list. An empty or unset key fails closed and never quietly drops back to a checksum check. Current opentine refuses HMAC keys shorter than 16 bytes and will not sign a run that is still running; `GraphRecorder.save` checks the key length up front and raises a clear error.
+
+Integrity is a checksum — it proves the file was not corrupted, not that nobody rewrote it. Only a signature is tamper evidence. `verify` reports the artifact's `format_version`, its `signature_schemes`, and `tags_covered_by_signature`, all read from the artifact itself. A legacy `tine-sig/1` signature (opentine 0.3–0.7.0) does **not** cover tags. `tine-sig/2` (0.7.1+) and `tine-sig/3` (v4 artifacts) do. Because older artifacts exist, every graphforge safety signal (`gate:*`, topology drift, unresolved joins) is still recorded as a *step* as well as a tag, so it is covered by the digest under every scheme.
 
 Model calls can be priced against opentine's signed rate-card catalog instead of carrying an unattributed float:
 
@@ -314,10 +320,12 @@ All budgets are **run-wide** and every enforcement records an honest, tagged `ga
 
 ```bash
 graphforge-mcp --runs-dir ~/.local/share/graphforge
-# or: graphforge mcp-server
+graphforge-mcp --read-only --repo .     # for agents reading untrusted run content
 ```
 
-Tools: `list_graph_runs`, `show_graph_run`, `show_graph_topology` (topology + trail of edges actually taken + mermaid), `diff_graph_runs`, `fork_graph_run`. All backed by plain functions that work without the `mcp` package installed.
+Tools: `list_graph_runs`, `show_graph_run`, `show_graph_topology` (topology + trail of edges actually taken + mermaid), `diff_graph_runs`, `graph_diff_runs`, `fork_graph_run`. All backed by plain functions that work without the `mcp` package installed.
+
+`--read-only` removes every tool that writes. That means `fork_graph_run` here, plus fork/resume/evaluate/attest from opentine's repository tools, which go through opentine's own reviewed read-only allowlist. On an opentine without that allowlist, read-only mode registers none of opentine's repository tools rather than guess which ones are safe. Promotion is never exposed, in either mode.
 
 ## Repository structure
 
